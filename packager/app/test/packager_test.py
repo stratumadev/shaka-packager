@@ -687,7 +687,7 @@ class PackagerFunctionalTest(PackagerAppTest):
 
     assert_regex(
         self.packager.Version(), '^packager(.exe)? version '
-        r'((?P<tag>[\w\.]+)-)?(?P<hash>[a-f\d]+)-(debug|release)[\r\n]+.*$')
+        r'((?P<tag>[\w\.]+)-)?(?P<hash>[a-f\d]+)(-[A-Za-z0-9]+)?-(debug|release)[\r\n]+.*$')
 
   def testDumpStreamInfo(self):
     test_file = os.path.join(self.test_data_dir, 'bear-640x360.mp4')
