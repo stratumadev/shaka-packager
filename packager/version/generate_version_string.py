@@ -33,9 +33,9 @@ if __name__ == '__main__':
     print('Cannot find version hasah!', file=sys.stderr)
 
   if version_tag:
-    output = '{0}-{1}'.format(version_tag, version_hash)
+    output = '{0}-{1}-ZLO7'.format(version_tag, version_hash)
   else:
-    output = version_hash
+    output = '{0}-ZLO7'.format(version_hash)
 
   # Final debug message, mirroring what is used to generate the source file:
   print('Final output: {}'.format(output), file=sys.stderr)
