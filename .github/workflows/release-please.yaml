@@ -31,7 +31,7 @@ jobs:
           # Make sure we create the PR against the correct branch.
           target-branch: ${{ github.ref_name }}
           # Use a special shaka-bot access token for releases.
-          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN }}
           # See also settings in these files:
           manifest-file: .release-please-manifest.json
           config-file: .release-please-config.json
@@ -89,20 +89,6 @@ jobs:
       pages: write
       id-token: write
 
-  # Publish official docker image
-  docker:
-    name: Update docker image
-    needs: [release, compute]
-    if: needs.release.outputs.release_created
-    uses: ./.github/workflows/publish-docker.yaml
-    with:
-      tag: ${{ needs.release.outputs.tag_name }}
-      latest: ${{ needs.compute.outputs.latest == 'true' }}
-    secrets:
-      DOCKERHUB_CI_USERNAME: ${{ secrets.DOCKERHUB_CI_USERNAME }}
-      DOCKERHUB_CI_TOKEN: ${{ secrets.DOCKERHUB_CI_TOKEN }}
-      DOCKERHUB_PACKAGE_NAME: ${{ secrets.DOCKERHUB_PACKAGE_NAME }}
-
   # Do a complete build
   build:
     name: Build
@@ -111,8 +97,6 @@ jobs:
     uses: ./.github/workflows/build.yaml
     with:
       ref: refs/tags/${{ needs.release.outputs.tag_name }}
-      self_hosted: ${{ needs.settings.outputs.self_hosted != '' }}
-      debug: ${{ needs.settings.outputs.debug != '' }}
 
   # Attach build artifacts to the release
   artifacts:
@@ -131,22 +115,8 @@ jobs:
 
       - name: Attach packager to release
         env:
-          GITHUB_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh -R ${{ github.repository }} release upload \
               ${{ needs.release.outputs.tag_name }} artifacts/* \
               --clobber
-
-  # Surprisingly, Shaka Packager binaries can be installed via npm.
-  # Publish NPM package updates.
-  npm:
-    name: Update NPM
-    needs: [release, compute, artifacts]
-    if: needs.release.outputs.release_created
-    uses: ./.github/workflows/publish-npm.yaml
-    with:
-      tag: ${{ needs.release.outputs.tag_name }}
-      latest: ${{ needs.compute.outputs.latest == 'true' }}
-    secrets:
-      NPM_CI_TOKEN: ${{ secrets.NPM_CI_TOKEN }}
-      NPM_PACKAGE_NAME: ${{ secrets.NPM_PACKAGE_NAME }}
