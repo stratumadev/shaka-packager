@@ -124,15 +124,32 @@ bool LocalFile::Open() {
     // first if it needs to be created.
     auto parent_path = file_path.parent_path();
     std::error_code ec;
-    if (parent_path != "" && !std::filesystem::is_directory(parent_path, ec)) {
+    if (!parent_path.empty() &&
+        !std::filesystem::is_directory(parent_path, ec)) {
       if (!std::filesystem::create_directories(parent_path, ec)) {
+        LOG(ERROR) << "Failed to create parent directories for: "
+                   << file_name();
         return false;
       }
     }
   }
 
-  internal_file_ = fopen(file_path.u8string().c_str(), file_mode_.c_str());
-  return (internal_file_ != NULL);
+  #if defined(_WIN32)
+    std::filesystem::path canonical = file_path.make_preferred();
+    std::wstring wpath = L"\\\\?\\" + canonical.wstring();
+    std::wstring wmode(file_mode_.begin(), file_mode_.end());
+
+    internal_file_ = _wfopen(wpath.c_str(), wmode.c_str());
+  #else
+    internal_file_ = fopen(file_path.u8string().c_str(), file_mode_.c_str());
+  #endif
+
+  if (!internal_file_) {
+    LOG(ERROR) << "Failed to open file: " << file_name()
+               << " (mode: " << file_mode_ << ")";
+    return false;
+  }
+  return true;
 }
 
 bool LocalFile::Delete(const char* file_name) {
