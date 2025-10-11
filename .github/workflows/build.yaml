@@ -82,8 +82,8 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.build_matrix_config.outputs.INCLUDE) }}
         os: ${{ fromJSON(needs.build_matrix_config.outputs.OS) }}
-        build_type: ["Debug", "Release"]
-        lib_type: ["static", "shared"]
+        build_type: ["Release"]
+        lib_type: ["static"]
 
     name: ${{ matrix.os_name }} ${{ matrix.target_arch }} ${{ matrix.build_type }} ${{ matrix.lib_type }}
     runs-on: ${{ matrix.os }}
@@ -199,6 +199,7 @@ jobs:
           fi
 
           cmake \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DCMAKE_BUILD_TYPE="${{ matrix.build_type }}" \
             -DBUILD_SHARED_LIBS="$BUILD_SHARED_LIBS" \
             -DFULLY_STATIC="$FULLY_STATIC" \
