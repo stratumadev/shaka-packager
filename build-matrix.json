@@ -9,13 +9,6 @@
       "generator": "Ninja"
     },
     {
-      "os": "macos-latest",
-      "os_name": "osx",
-      "target_arch": "arm64",
-      "exe_ext": "",
-      "generator": "Ninja"
-    },
-    {
       "os": "windows-latest",
       "os_name": "win",
       "target_arch": "x64",
