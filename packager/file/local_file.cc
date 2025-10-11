@@ -134,15 +134,15 @@ bool LocalFile::Open() {
     }
   }
 
-  #if defined(_WIN32)
-    std::filesystem::path canonical = file_path.make_preferred();
-    std::wstring wpath = L"\\\\?\\" + canonical.wstring();
-    std::wstring wmode(file_mode_.begin(), file_mode_.end());
+#if defined(_WIN32)
+  std::filesystem::path canonical = file_path.make_preferred();
+  std::wstring wpath = L"\\\\?\\" + canonical.wstring();
+  std::wstring wmode(file_mode_.begin(), file_mode_.end());
 
-    internal_file_ = _wfopen(wpath.c_str(), wmode.c_str());
-  #else
-    internal_file_ = fopen(file_path.u8string().c_str(), file_mode_.c_str());
-  #endif
+  internal_file_ = _wfopen(wpath.c_str(), wmode.c_str());
+#else
+  internal_file_ = fopen(file_path.u8string().c_str(), file_mode_.c_str());
+#endif
 
   if (!internal_file_) {
     LOG(ERROR) << "Failed to open file: " << file_name()
