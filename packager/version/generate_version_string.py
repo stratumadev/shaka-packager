@@ -33,7 +33,7 @@ if __name__ == '__main__':
     print('Cannot find version hasah!', file=sys.stderr)
 
   if version_tag:
-    output = 'ZLO7-{0}-{1}'.format(version_tag, version_hash)
+    output = '{0}-{1}'.format(version_tag, version_hash)
   else:
     output = version_hash
 
