@@ -203,6 +203,8 @@ jobs:
             -DCMAKE_BUILD_TYPE="${{ matrix.build_type }}" \
             -DBUILD_SHARED_LIBS="$BUILD_SHARED_LIBS" \
             -DFULLY_STATIC="$FULLY_STATIC" \
+            -DPNG_BUILD_ZLIB=OFF \
+            -DZLIB_ROOT="${{ github.workspace }}/packager/third_party/zlib/source" \
             -S . \
             -B build/
 
