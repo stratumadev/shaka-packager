@@ -18,17 +18,9 @@ jobs:
   build:
     name: Build
     needs: settings
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout source
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Run build workflow
-        uses: ./.github/workflows/build.yaml
-        with:
-          ref: refs/tags/${{ github.event.release.tag_name }}
+    uses: ./.github/workflows/build.yaml
+    with:
+      ref: refs/tags/${{ github.event.release.tag_name }}
 
   artifacts:
     name: Upload Artifacts

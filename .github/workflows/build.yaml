@@ -20,11 +20,6 @@ on:
         required: false
         type: boolean
         default: false
-      # If true, enable self-hosted runners in the build matrix.
-      self_hosted:
-        required: false
-        type: boolean
-        default: false
 
 # By default, run all commands in a bash shell.  On Windows, the default would
 # otherwise be powershell.
@@ -55,14 +50,13 @@ jobs:
         run: |
           const fs = require('fs');
 
-          const enableSelfHosted = ${{ inputs.self_hosted }};
           const buildMatrix = JSON.parse(fs.readFileSync("${{ github.workspace }}/build-matrix.json"));
 
           // Use enableSelfHosted to decide what the build matrix below should
           // include.
-          const {hosted, selfHosted} = buildMatrix;
-          const include = enableSelfHosted ? hosted.concat(selfHosted) : hosted;
-          const os = include.map((config) => config.os);
+          const {hosted} = buildMatrix;
+          const include = hosted;
+          const os = hosted.map((config) => config.os);
 
           // Output JSON objects consumed by the build matrix below.
           fs.writeFileSync(process.env.GITHUB_OUTPUT,
