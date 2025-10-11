@@ -30,7 +30,6 @@ jobs:
         with:
           # Make sure we create the PR against the correct branch.
           target-branch: ${{ github.ref_name }}
-          # Use a special shaka-bot access token for releases.
           token: ${{ secrets.GITHUB_TOKEN }}
           # See also settings in these files:
           manifest-file: .release-please-manifest.json
