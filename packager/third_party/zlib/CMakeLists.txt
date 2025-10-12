@@ -11,7 +11,7 @@
 set(RENAME_ZCONF OFF)
 
 # Skip the building of zlib example apps and tests.
-set(ZLIB_BUILD_EXAMPLES OFF)
+set(ZLIB_BUILD_TESTING OFF)
 
 # Don't install anything.
 set(SKIP_INSTALL_ALL ON)

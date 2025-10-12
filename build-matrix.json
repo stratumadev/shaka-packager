@@ -9,6 +9,13 @@
       "generator": "Ninja"
     },
     {
+      "os": "macos-latest",
+      "os_name": "osx",
+      "target_arch": "arm64",
+      "exe_ext": "",
+      "generator": "Ninja"
+    },
+    {
       "os": "windows-latest",
       "os_name": "win",
       "target_arch": "x64",
@@ -25,6 +32,5 @@
   ],
 
   "comment2": "Self-hosted runners are not used since the introduction of GitHub-hosted Linux arm64 runners.  The feature still exists if a new platform becomes necessary.",
-  "selfHosted": [
-  ]
+  "selfHosted": []
 }
