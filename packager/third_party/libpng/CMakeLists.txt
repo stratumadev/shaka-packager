@@ -23,7 +23,7 @@ set(SKIP_INSTALL_ALL ON)
 set(ZLIB_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../zlib/source/")
 # Tell libpng where to find zlib library to link to.
 if (WIN32)
-  set(ZLIB_LIBRARY packager/third_party/zlib/source/Release/zlibstatic.lib)
+  set(ZLIB_LIBRARY packager/third_party/zlib/source/build/Release/zlibstatic.lib)
 else()
   set(ZLIB_LIBRARY packager/third_party/zlib/source/libz.a)
 endif()
