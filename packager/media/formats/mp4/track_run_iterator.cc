@@ -145,8 +145,10 @@ static void PopulateSampleInfo(const TrackExtends& trex,
 class CompareMinTrackRunDataOffset {
  public:
   bool operator()(const TrackRunInfo& a, const TrackRunInfo& b) {
-    int64_t a_aux = a.aux_info_total_size ? a.aux_info_start_offset : kInvalidOffset;
-    int64_t b_aux = b.aux_info_total_size ? b.aux_info_start_offset : kInvalidOffset;
+    int64_t a_aux =
+        a.aux_info_total_size ? a.aux_info_start_offset : kInvalidOffset;
+    int64_t b_aux =
+        b.aux_info_total_size ? b.aux_info_start_offset : kInvalidOffset;
 
     int64_t a_lesser = std::min(a_aux, a.sample_start_offset);
     int64_t a_greater = std::max(a_aux, a.sample_start_offset);
@@ -291,7 +293,17 @@ bool TrackRunIterator::Init(const MovieFragment& moof) {
   next_fragment_start_dts_.resize(track_count, 0);
   for (size_t i = 0; i < moof.tracks.size(); i++) {
     const TrackFragment& traf = moof.tracks[i];
-    const auto track_index = traf.header.track_id - 1;
+    // Better Track Index handler
+    size_t track_index = 0;
+    for (; track_index < moov_->tracks.size(); ++track_index) {
+      if (moov_->tracks[track_index].header.track_id == traf.header.track_id)
+        break;
+    }
+    if (track_index == moov_->tracks.size()) {
+      LOG(ERROR) << "Invalid track_id " << traf.header.track_id
+                 << " not found in moov box.";
+      return false;
+    }
     const Track* trak = NULL;
     for (size_t t = 0; t < moov_->tracks.size(); t++) {
       if (moov_->tracks[t].header.track_id == traf.header.track_id)
@@ -345,11 +357,10 @@ bool TrackRunIterator::Init(const MovieFragment& moof) {
     if (!traf.sample_encryption.sample_encryption_data.empty()) {
       RCHECK(audio_sample_entry || video_sample_entry);
       const uint8_t default_per_sample_iv_size =
-          audio_sample_entry
-              ? audio_sample_entry->sinf.info.track_encryption
-                    .default_per_sample_iv_size
-              : video_sample_entry->sinf.info.track_encryption
-                    .default_per_sample_iv_size;
+          audio_sample_entry ? audio_sample_entry->sinf.info.track_encryption
+                                   .default_per_sample_iv_size
+                             : video_sample_entry->sinf.info.track_encryption
+                                   .default_per_sample_iv_size;
       RCHECK(traf.sample_encryption.ParseFromSampleEncryptionData(
           default_per_sample_iv_size, &sample_encryption_entries));
     }
@@ -403,8 +414,7 @@ bool TrackRunIterator::Init(const MovieFragment& moof) {
           const std::vector<uint8_t>& sizes =
               traf.auxiliary_size.sample_info_sizes;
           tri.aux_info_sizes.insert(
-              tri.aux_info_sizes.begin(),
-              sizes.begin() + sample_count_sum,
+              tri.aux_info_sizes.begin(), sizes.begin() + sample_count_sum,
               sizes.begin() + sample_count_sum + trun.sample_count);
         }
 
@@ -492,7 +502,9 @@ bool TrackRunIterator::CacheAuxInfo(const uint8_t* buf, int buf_size) {
   return true;
 }
 
-bool TrackRunIterator::IsRunValid() const { return run_itr_ != runs_.end(); }
+bool TrackRunIterator::IsRunValid() const {
+  return run_itr_ != runs_.end();
+}
 
 bool TrackRunIterator::IsSampleValid() const {
   return IsRunValid() && (sample_itr_ != run_itr_->samples.end());

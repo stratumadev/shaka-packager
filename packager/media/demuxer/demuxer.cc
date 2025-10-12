@@ -161,7 +161,6 @@ Status Demuxer::InitializeParser() {
 
   media_file_ = File::Open(file_name_.c_str(), "r");
   if (!media_file_) {
-    LOG(ERROR) << "Failed to open or parse input file: " << file_name_;
     return Status(error::FILE_FAILURE,
                   "Cannot open file for reading " + file_name_);
   }
