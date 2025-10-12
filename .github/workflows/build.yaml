@@ -166,7 +166,8 @@ jobs:
 
           BUILD_CONFIG="${{ matrix.build_type }}-${{ matrix.lib_type }}"
           if [[ "${{ runner.os }}" == "Windows" ]]; then
-            cmake -G "Visual Studio 16 2019" -T host=x64 -A x64 \
+            cmake -G "Visual Studio 16 2022" -T host=x64 -A x64 \
+              -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
               -DCMAKE_BUILD_TYPE="${{ matrix.build_type }}" \
               -DBUILD_SHARED_LIBS="$BUILD_SHARED_LIBS" \
               -DFULLY_STATIC="OFF" \
@@ -181,13 +182,15 @@ jobs:
             tar xf "$MUSL_ARCH"-linux-musl-native.tgz
             export CC=`pwd`/"$MUSL_ARCH"-linux-musl-native/bin/"$MUSL_ARCH"-linux-musl-gcc
             export CXX=`pwd`/"$MUSL_ARCH"-linux-musl-native/bin/"$MUSL_ARCH"-linux-musl-g++
-            cmake
+            cmake \
+              -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
               -DCMAKE_BUILD_TYPE="${{ matrix.build_type }}" \
               -DBUILD_SHARED_LIBS="$BUILD_SHARED_LIBS" \
-              -DFULLY_STATIC="ON" \
+              -DFULLY_STATIC="$FULLY_STATIC" \
               -S . -B build/
           else
-            cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            cmake \
+              -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
               -DCMAKE_BUILD_TYPE="${{ matrix.build_type }}" \
               -DBUILD_SHARED_LIBS="$BUILD_SHARED_LIBS" \
               -DFULLY_STATIC="OFF" \
