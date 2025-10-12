@@ -166,7 +166,7 @@ jobs:
 
           BUILD_CONFIG="${{ matrix.build_type }}-${{ matrix.lib_type }}"
           if [[ "${{ runner.os }}" == "Windows" ]]; then
-            cmake -G "Visual Studio 16 2022" -T host=x64 -A x64 \
+            cmake -G "Visual Studio 17 2022" -T host=x64 -A x64 \
               -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
               -DCMAKE_BUILD_TYPE="${{ matrix.build_type }}" \
               -DBUILD_SHARED_LIBS="$BUILD_SHARED_LIBS" \
