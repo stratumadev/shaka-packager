@@ -22,7 +22,11 @@ set(SKIP_INSTALL_ALL ON)
 # Tell libpng where to find zlib headers.
 set(ZLIB_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../zlib/source/")
 # Tell libpng where to find zlib library to link to.
-set(ZLIB_LIBRARY "${CMAKE_SOURCE_DIR}/build/packager/third_party/zlib/source/Release/zlibstatic.lib")
+if (WIN32)
+  set(ZLIB_LIBRARY "${CMAKE_SOURCE_DIR}/build/packager/third_party/zlib/source/build/Release/zlibstatic.lib")
+else()
+  set(ZLIB_LIBRARY "${CMAKE_SOURCE_DIR}/packager/third_party/zlib/source/libz.a")
+endif()
 # Tell libpng where to find libm on Linux (-lm).
 set(M_LIBRARY m)
 
