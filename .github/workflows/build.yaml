@@ -164,15 +164,27 @@ jobs:
             BUILD_SHARED_LIBS="OFF"
           fi
 
+          # If set, override the default generator for the platform.
+          # Not every entry in the build matrix config defines this.
+          # If this is blank, CMake will choose the default generator.
+          export CMAKE_GENERATOR="${{ matrix.generator }}"
+
+          # If set, configure the build to restrict parallel operations.
+          # This helps us avoid the compiler failing due to a lack of RAM
+          # on our arm64 build devices (4GB RAM shared among 6 CPUs).
+          if [[ "${{ matrix.low_mem }}" != "" ]]; then
+            export PACKAGER_LOW_MEMORY_BUILD=yes
+          fi
+
+          # Do fully static release builds on Linux.
           BUILD_CONFIG="${{ matrix.build_type }}-${{ matrix.lib_type }}"
-          if [[ "${{ runner.os }}" == "Windows" ]]; then
-            cmake -G "Visual Studio 17 2022" -T host=x64 -A x64 \
-              -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
-              -DCMAKE_BUILD_TYPE="${{ matrix.build_type }}" \
-              -DBUILD_SHARED_LIBS="$BUILD_SHARED_LIBS" \
-              -DFULLY_STATIC="OFF" \
-              -S . -B build/
-          elif [[ "${{ runner.os }}" == "Linux" && "$BUILD_CONFIG" == "Release-static" ]]; then
+          if [[ "${{ runner.os }}" == "Linux" && \
+                "$BUILD_CONFIG" == "Release-static" ]]; then
+            # Enable build settings for fully-static.
+            FULLY_STATIC="ON"
+
+            # Use a musl toolchain, since glibc static executables are not
+            # portable.
             if [[ "${{matrix.target_arch}}" == "arm64" ]]; then
               MUSL_ARCH="aarch64"
             else
@@ -182,20 +194,17 @@ jobs:
             tar xf "$MUSL_ARCH"-linux-musl-native.tgz
             export CC=`pwd`/"$MUSL_ARCH"-linux-musl-native/bin/"$MUSL_ARCH"-linux-musl-gcc
             export CXX=`pwd`/"$MUSL_ARCH"-linux-musl-native/bin/"$MUSL_ARCH"-linux-musl-g++
-            cmake \
-              -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
-              -DCMAKE_BUILD_TYPE="${{ matrix.build_type }}" \
-              -DBUILD_SHARED_LIBS="$BUILD_SHARED_LIBS" \
-              -DFULLY_STATIC="$FULLY_STATIC" \
-              -S . -B build/
           else
-            cmake \
-              -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
-              -DCMAKE_BUILD_TYPE="${{ matrix.build_type }}" \
-              -DBUILD_SHARED_LIBS="$BUILD_SHARED_LIBS" \
-              -DFULLY_STATIC="OFF" \
-              -S . -B build/
+            FULLY_STATIC="OFF"
           fi
+
+          cmake \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DCMAKE_BUILD_TYPE="${{ matrix.build_type }}" \
+            -DBUILD_SHARED_LIBS="$BUILD_SHARED_LIBS" \
+            -DFULLY_STATIC="$FULLY_STATIC" \
+            -S . \
+            -B build/
 
       - name: Build
         # This is a universal build command, which will call make on Linux and
@@ -211,7 +220,7 @@ jobs:
         uses: mikepenz/action-junit-report@v4
         if: ${{ always() }}
         with:
-          report_paths: "junit-reports/TEST-*.xml"
+          report_paths: 'junit-reports/TEST-*.xml'
 
       - name: Prepare artifacts (static release only)
         run: |
