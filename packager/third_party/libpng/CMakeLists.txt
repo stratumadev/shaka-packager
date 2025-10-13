@@ -23,7 +23,7 @@ set(SKIP_INSTALL_ALL ON)
 set(ZLIB_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../zlib/source/")
 # Tell libpng where to find zlib library to link to.
 if (WIN32)
-  set(ZLIB_LIBRARY "${PROJECT_SOURCE_DIR}/build/packager/third_party/zlib/source/Release/zlibstatic.lib")
+  set(ZLIB_LIBRARY "${CMAKE_BINARY_DIR}/packager/third_party/zlib/source/Release/zlibstatic.lib")
 else()
   set(ZLIB_LIBRARY packager/third_party/zlib/source/libz.a)
 endif()
@@ -32,6 +32,11 @@ set(M_LIBRARY m)
 
 # With these set in scope of this folder, load the library's own CMakeLists.txt.
 add_subdirectory(source)
+
+# Trigger zlib building
+if (WIN32)
+  target_link_libraries(png_static PUBLIC zlibstatic)
+endif()
 
 # Add missing include directories for users of png_static:
 target_include_directories(png_static PUBLIC
