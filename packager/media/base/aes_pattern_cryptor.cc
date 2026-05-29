@@ -37,7 +37,7 @@ AesPatternCryptor::~AesPatternCryptor() {}
 
 bool AesPatternCryptor::InitializeWithIv(const std::vector<uint8_t>& key,
                                          const std::vector<uint8_t>& iv) {
-  return SetIv(iv) && cryptor_->InitializeWithIv(key, iv);
+  return cryptor_->InitializeWithIv(key, iv) && SetIv(iv);
 }
 
 bool AesPatternCryptor::CryptInternal(const uint8_t* text,
