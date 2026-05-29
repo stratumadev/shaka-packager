@@ -220,7 +220,7 @@ jobs:
         uses: mikepenz/action-junit-report@v4
         if: ${{ always() }}
         with:
-          report_paths: 'junit-reports/TEST-*.xml'
+          report_paths: "junit-reports/TEST-*.xml"
 
       - name: Prepare artifacts (static release only)
         run: |
@@ -233,7 +233,7 @@ jobs:
           # Check static executables
           if [[ "${{ runner.os }}" == "Linux" ]]; then
             echo "::group::Check static executables"
-            for exe in build/packager/{packager,mpd_generator}; do
+            for exe in build/packager/{packager,mpd_generator,shaka_decrypt}; do
               # Capture information about the executables, but also let it be
               # logged to stdout.
               ldd "$exe" | tee static.log
@@ -259,6 +259,7 @@ jobs:
           echo "::group::Strip executables"
           strip packager${{ matrix.exe_ext }}
           strip mpd_generator${{ matrix.exe_ext }}
+          strip shaka_decrypt${{ matrix.exe_ext }}
           echo "::endgroup::"
 
           SUFFIX="-${{ matrix.os_name }}-${{ matrix.target_arch }}"
@@ -270,6 +271,10 @@ jobs:
 
           echo "::group::Copy mpd_generator"
           cp mpd_generator${{ matrix.exe_ext }} $ARTIFACTS/mpd_generator$EXE_SUFFIX
+          echo "::endgroup::"
+
+          echo "::group::Copy shaka_decrypt"
+          cp shaka_decrypt${{ matrix.exe_ext }} $ARTIFACTS/shaka_decrypt$EXE_SUFFIX
           echo "::endgroup::"
 
           # The pssh-box bundle is OS and architecture independent.  So only do

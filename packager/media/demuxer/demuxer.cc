@@ -22,11 +22,15 @@
 #include <packager/media/base/key_source.h>
 #include <packager/media/base/media_sample.h>
 #include <packager/media/base/stream_info.h>
+#if !defined(SHAKA_DECRYPT)
 #include <packager/media/formats/mp2t/mp2t_media_parser.h>
+#endif
 #include <packager/media/formats/mp4/mp4_media_parser.h>
+#if !defined(SHAKA_DECRYPT)
 #include <packager/media/formats/webm/webm_media_parser.h>
 #include <packager/media/formats/webvtt/webvtt_parser.h>
 #include <packager/media/formats/wvm/wvm_media_parser.h>
+#endif
 
 namespace {
 // 65KB, sufficient to determine the container and likely all init data.
@@ -190,6 +194,7 @@ Status Demuxer::InitializeParser() {
     case CONTAINER_MOV:
       parser_.reset(new mp4::MP4MediaParser());
       break;
+#if !defined(SHAKA_DECRYPT)
     case CONTAINER_MPEG2TS:
       parser_.reset(new mp2t::Mp2tMediaParser());
       break;
@@ -209,6 +214,7 @@ Status Demuxer::InitializeParser() {
     case CONTAINER_WEBVTT:
       parser_.reset(new WebVttParser());
       break;
+#endif
     case CONTAINER_UNKNOWN: {
       const int64_t kDumpSizeLimit = 512;
       LOG(ERROR) << "Failed to detect the container type from the buffer: "

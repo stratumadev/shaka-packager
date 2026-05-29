@@ -16,6 +16,16 @@ target_link_libraries(demuxer
   formats_webm
   media_origin)
 
+add_library(demuxer_mp4_only STATIC
+  demuxer.cc
+  demuxer.h)
+target_compile_definitions(demuxer_mp4_only
+  PRIVATE SHAKA_DECRYPT=1)
+target_link_libraries(demuxer_mp4_only
+  media_base
+  mp4
+  media_origin)
+
 add_executable(demuxer_unittest
   demuxer_unittest.cc
   )

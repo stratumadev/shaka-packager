@@ -13,6 +13,10 @@
 #include <string>
 #include <vector>
 
+#if defined(_M_X64) && !defined(__clang__)
+#include <wmmintrin.h>
+#endif
+
 #include <packager/macros/classes.h>
 #include <packager/media/base/aes_cryptor.h>
 
@@ -43,8 +47,10 @@ class AesCtrEncryptor : public AesCryptor {
   uint32_t block_offset_;
   // Current AES-CTR counter.
   std::vector<uint8_t> counter_;
-  // Encrypted counter.
-  std::vector<uint8_t> encrypted_counter_;
+#if defined(_M_X64) && !defined(__clang__)
+  bool use_aesni_128_ = false;
+  __m128i aesni_round_keys_[11];
+#endif
 
   DISALLOW_COPY_AND_ASSIGN(AesCtrEncryptor);
 };

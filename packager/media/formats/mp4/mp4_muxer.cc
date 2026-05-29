@@ -29,7 +29,9 @@
 #include <packager/media/formats/mp4/low_latency_segment_segmenter.h>
 #include <packager/media/formats/mp4/multi_segment_segmenter.h>
 #include <packager/media/formats/mp4/single_segment_segmenter.h>
+#if !defined(SHAKA_DECRYPT)
 #include <packager/media/formats/ttml/ttml_generator.h>
+#endif
 
 namespace shaka {
 namespace media {
@@ -662,7 +664,9 @@ bool MP4Muxer::GenerateTextTrak(const TextStreamInfo* text_info,
     sample_description.type = kText;
     sample_description.text_entries.push_back(webvtt);
     return true;
-  } else if (text_info->codec_string() == "ttml") {
+  }
+#if !defined(SHAKA_DECRYPT)
+  else if (text_info->codec_string() == "ttml") {
     // Handle TTML.
     TextSampleEntry ttml;
     ttml.format = FOURCC_stpp;
@@ -674,6 +678,7 @@ bool MP4Muxer::GenerateTextTrak(const TextStreamInfo* text_info,
     sample_description.text_entries.push_back(ttml);
     return true;
   }
+#endif
   NOTIMPLEMENTED() << text_info->codec_string()
                    << " handling not implemented yet.";
   return false;

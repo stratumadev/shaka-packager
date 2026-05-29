@@ -48,6 +48,50 @@ target_link_libraries(mp4
   ttml
   )
 
+add_library(mp4_decrypt_only STATIC
+  box.cc
+  box.h
+  box_buffer.h
+  box_definitions.cc
+  box_definitions.h
+  box_reader.cc
+  box_reader.h
+  chunk_info_iterator.cc
+  chunk_info_iterator.h
+  composition_offset_iterator.cc
+  composition_offset_iterator.h
+  decoding_time_iterator.cc
+  decoding_time_iterator.h
+  fragmenter.cc
+  fragmenter.h
+  key_frame_info.h
+  low_latency_segment_segmenter.cc
+  low_latency_segment_segmenter.h
+  mp4_media_parser.cc
+  mp4_media_parser.h
+  mp4_muxer.cc
+  mp4_muxer.h
+  multi_segment_segmenter.cc
+  multi_segment_segmenter.h
+  segmenter.cc
+  segmenter.h
+  single_segment_segmenter.cc
+  single_segment_segmenter.h
+  sync_sample_iterator.cc
+  sync_sample_iterator.h
+  track_run_iterator.cc
+  track_run_iterator.h
+  )
+target_compile_definitions(mp4_decrypt_only
+  PRIVATE SHAKA_DECRYPT=1)
+target_link_libraries(mp4_decrypt_only
+  media_base
+  mbedtls
+  media_codecs
+  media_event
+  absl::flags
+  )
+
 add_executable(mp4_unittest
   box_definitions_unittest.cc
   box_reader_unittest.cc

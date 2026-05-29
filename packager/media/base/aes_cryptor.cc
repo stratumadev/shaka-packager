@@ -141,19 +141,17 @@ bool AesCryptor::SetupCipher(size_t key_size, CipherMode mode) {
   mbedtls_cipher_type_t type;
 
   // AES defines three key sizes: 128, 192 and 256 bits.
-  // NOTE: Because we use ECB mode in the CTR cryptors, this returns ECB
-  // instead of CTR.  Counters and block offsets are managed internally.
   switch (key_size) {
     case 16:
-      type = mode == kCtrMode ? MBEDTLS_CIPHER_AES_128_ECB
+      type = mode == kCtrMode ? MBEDTLS_CIPHER_AES_128_CTR
                               : MBEDTLS_CIPHER_AES_128_CBC;
       break;
     case 24:
-      type = mode == kCtrMode ? MBEDTLS_CIPHER_AES_192_ECB
+      type = mode == kCtrMode ? MBEDTLS_CIPHER_AES_192_CTR
                               : MBEDTLS_CIPHER_AES_192_CBC;
       break;
     case 32:
-      type = mode == kCtrMode ? MBEDTLS_CIPHER_AES_256_ECB
+      type = mode == kCtrMode ? MBEDTLS_CIPHER_AES_256_CTR
                               : MBEDTLS_CIPHER_AES_256_CBC;
       break;
     default:

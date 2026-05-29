@@ -182,6 +182,24 @@ target_link_libraries(packager
   ${EXTRA_EXE_LIBRARIES}
 )
 
+add_executable(shaka_decrypt
+  app/decrypt_main.cc
+)
+target_compile_definitions(shaka_decrypt
+  PRIVATE SHAKA_DECRYPT=1)
+target_link_libraries(shaka_decrypt
+  absl::log
+  absl::strings
+  demuxer_mp4_only
+  file
+  kv_pairs
+  media_base
+  media_chunking
+  mp4_decrypt_only
+  status
+  ${EXTRA_EXE_LIBRARIES}
+)
+
 add_executable(mpd_generator
   app/mpd_generator.cc
   app/mpd_generator_flags.h
@@ -254,7 +272,7 @@ endif()
 configure_file(packager.pc.in packager.pc @ONLY)
 
 # Always install the binaries.
-install(TARGETS mpd_generator packager)
+install(TARGETS mpd_generator packager shaka_decrypt)
 
 # With shared libraries, also install the library, headers, and pkgconfig.
 # The static library isn't usable as a standalone because it doesn't include
