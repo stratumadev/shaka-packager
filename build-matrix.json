@@ -16,6 +16,13 @@
       "generator": "Ninja"
     },
     {
+      "os": "macos-26-intel",
+      "os_name": "osx",
+      "target_arch": "x64",
+      "exe_ext": "",
+      "generator": "Ninja"
+    },
+    {
       "os": "windows-latest",
       "os_name": "win",
       "target_arch": "x64",
