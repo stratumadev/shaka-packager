@@ -16,7 +16,7 @@
       "generator": "Ninja"
     },
     {
-      "os": "macos-26-intel",
+      "os": "macos-15-intel",
       "os_name": "osx",
       "target_arch": "x64",
       "exe_ext": "",

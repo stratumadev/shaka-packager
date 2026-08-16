@@ -246,6 +246,21 @@ jobs:
             echo "::endgroup::"
           fi
 
+          # macOS release binaries must not depend on packages installed by
+          # Homebrew on the build runner.
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
+            echo "::group::Check portable macOS executables"
+            for exe in build/packager/{packager,mpd_generator,shaka_decrypt}; do
+              dependencies="$(otool -L "$exe")"
+              echo "$dependencies"
+              if grep -Eq '/(opt/homebrew|usr/local)/' <<< "$dependencies"; then
+                echo "$exe contains a build-runner dependency" >&2
+                exit 1
+              fi
+            done
+            echo "::endgroup::"
+          fi
+
           echo "::group::Prepare artifacts folder"
           mkdir artifacts
           ARTIFACTS="$GITHUB_WORKSPACE/artifacts"
