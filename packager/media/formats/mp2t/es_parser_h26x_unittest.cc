@@ -13,10 +13,15 @@
 #include <absl/log/log.h>
 #include <gtest/gtest.h>
 
+#include <packager/media/base/aes_decryptor.h>
+#include <packager/media/base/aes_encryptor.h>
+#include <packager/media/base/aes_pattern_cryptor.h>
+#include <packager/media/base/buffer_writer.h>
 #include <packager/media/base/media_sample.h>
 #include <packager/media/base/stream_info.h>
 #include <packager/media/base/timestamp.h>
 #include <packager/media/codecs/h26x_byte_to_unit_stream_converter.h>
+#include <packager/media/codecs/nal_unit_to_byte_stream_converter.h>
 
 namespace shaka {
 namespace media {
@@ -79,12 +84,14 @@ class TestableEsParser : public EsParserH26x {
  public:
   TestableEsParser(Nalu::CodecType codec_type,
                    const NewStreamInfoCB& new_stream_info_cb,
-                   const EmitSampleCB& emit_sample_cb)
+                   const EmitSampleCB& emit_sample_cb,
+                   std::unique_ptr<AesCryptor> decryptor = nullptr)
       : EsParserH26x(codec_type,
                      std::unique_ptr<H26xByteToUnitStreamConverter>(
                          new FakeByteToUnitStreamConverter(codec_type)),
                      0,
-                     emit_sample_cb),
+                     emit_sample_cb,
+                     std::move(decryptor)),
         codec_type_(codec_type),
         new_stream_info_cb_(new_stream_info_cb),
         decoder_config_check_pending_(false) {}
@@ -389,6 +396,64 @@ TEST_F(EsParserH26xTest, H264BasicSupport) {
   EXPECT_EQ(3u, media_samples_.size());
   for (size_t i = 0; i < media_samples_.size(); i++) {
     EXPECT_GT(media_samples_[i]->duration(), 0u);
+  }
+}
+
+TEST_F(EsParserH26xTest, SampleAesPreservesEscapingAndPatternBoundaries) {
+  const std::vector<uint8_t> key(16, 0x51);
+  const std::vector<uint8_t> iv(16, 0x72);
+  const uint8_t start_code[] = {0, 0, 1};
+  for (size_t size : {47, 48, 49, 64, 65, 192, 208, 209, 224, 225, 369}) {
+    SCOPED_TRACE(size);
+    std::vector<uint8_t> original(size, 0x11);
+    original[0] = kH264VclKeyFrame;
+    original[1] = 0;
+    // Original NAL escaping must survive removing the encryption layer.
+    original[8] = 0;
+    original[9] = 0;
+    original[10] = 3;
+    original[11] = 1;
+    std::vector<uint8_t> encrypted(original);
+    AesCbcEncryptor encryptor(kNoPadding);
+    ASSERT_TRUE(encryptor.InitializeWithIv(key, iv));
+    // Use ordinary CBC on individual blocks as an independent pattern oracle.
+    // A final complete block with no byte following it remains clear.
+    for (size_t offset = 32; offset + 16 < size; offset += 160)
+      ASSERT_TRUE(encryptor.Crypt(encrypted.data() + offset, 16,
+                                  encrypted.data() + offset));
+    BufferWriter input;
+    input.AppendArray(start_code, sizeof(start_code));
+    if (size > 48)
+      EscapeNalByteSequence(encrypted.data(), encrypted.size(), &input);
+    else
+      input.AppendVector(encrypted);
+
+    auto decryptor = std::make_unique<AesPatternCryptor>(
+        1, 9, AesPatternCryptor::kSkipIfCryptByteBlockRemaining,
+        AesCryptor::kUseConstantIv,
+        std::make_unique<AesCbcDecryptor>(kNoPadding));
+    ASSERT_TRUE(decryptor->InitializeWithIv(key, iv));
+    std::vector<std::vector<uint8_t>> samples;
+    TestableEsParser parser(
+        Nalu::kH264, [](std::shared_ptr<StreamInfo>) {},
+        [&samples](std::shared_ptr<MediaSample> sample) {
+          samples.emplace_back(sample->data(),
+                               sample->data() + sample->data_size());
+        },
+        std::move(decryptor));
+    for (size_t offset = 0; offset < input.Size(); ++offset) {
+      const int64_t timestamp = offset == 0 ? 90000 : kNoTimestamp;
+      ASSERT_TRUE(
+          parser.Parse(input.Buffer() + offset, 1, timestamp, timestamp));
+    }
+    ASSERT_TRUE(parser.Flush());
+    ASSERT_EQ(1u, samples.size());
+    BufferWriter expected;
+    expected.AppendInt(static_cast<uint32_t>(original.size()));
+    expected.AppendVector(original);
+    const std::vector<uint8_t> expected_sample(
+        expected.Buffer(), expected.Buffer() + expected.Size());
+    EXPECT_TRUE(expected_sample == samples[0]);
   }
 }
 

@@ -101,6 +101,7 @@ target_link_libraries(mp2t_unittest
   media_handler_test_base
   mock_muxer_listener
   mp2t
+  mp4
   test_data_util)
 
 add_test(NAME mp2t_unittest COMMAND mp2t_unittest)

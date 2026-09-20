@@ -15,6 +15,7 @@
 #include <gtest/gtest.h>
 
 #include <packager/file.h>
+#include <packager/media/base/aes_encryptor.h>
 #include <packager/media/base/buffer_writer.h>
 #include <packager/media/base/id3_tag.h>
 #include <packager/media/base/media_sample.h>
@@ -26,6 +27,7 @@
 
 using ::testing::_;
 using ::testing::DoAll;
+using ::testing::Invoke;
 using ::testing::Return;
 using ::testing::SetArgPointee;
 
@@ -107,6 +109,249 @@ class MockKeySource : public RawKeySource {
                Status(const std::string& stream_label, EncryptionKey* key));
 };
 
+uint16_t Ac3Crc(const uint8_t* data, size_t size) {
+  uint16_t crc = 0;
+  for (size_t i = 0; i < size; ++i) {
+    crc ^= static_cast<uint16_t>(data[i]) << 8;
+    for (int bit = 0; bit < 8; ++bit)
+      crc = (crc << 1) ^ ((crc & 0x8000) ? 0x8005 : 0);
+  }
+  return crc;
+}
+
+void SetAc3Crc(std::vector<uint8_t>* frame) {
+  const size_t split = ((frame->size() >> 2) + (frame->size() >> 4)) << 1;
+  // Invert the suffix to find the required CRC state after the leading CRC1.
+  uint16_t state = 0;
+  for (size_t i = split; i > 4; --i) {
+    for (int bit = 0; bit < 8; ++bit) {
+      const bool high = state & 1;
+      state = ((state ^ (high ? 0x8005 : 0)) >> 1) | (high ? 0x8000 : 0);
+    }
+    state ^= static_cast<uint16_t>((*frame)[i - 1]) << 8;
+  }
+  for (uint32_t crc = 0; crc <= 0xffff; ++crc) {
+    (*frame)[2] = crc >> 8;
+    (*frame)[3] = crc;
+    if (Ac3Crc(frame->data() + 2, 2) == state)
+      break;
+  }
+  const uint16_t crc2 =
+      Ac3Crc(frame->data() + split, frame->size() - split - 2);
+  (*frame)[frame->size() - 2] = crc2 >> 8;
+  frame->back() = crc2;
+  EXPECT_EQ(0, Ac3Crc(frame->data() + 2, split - 2));
+  EXPECT_EQ(0, Ac3Crc(frame->data() + split, frame->size() - split));
+}
+
+std::vector<uint8_t> MakeRecoverableAc3Frame(uint8_t coordinate = 0x31,
+                                             bool dynamic_range = false) {
+  std::vector<uint8_t> frame(128, 0);
+  size_t position = 0;
+  const auto write = [&frame, &position](uint32_t value, size_t count) {
+    for (size_t bit = count; bit > 0; --bit, ++position)
+      frame[position / 8] |= ((value >> (bit - 1)) & 1) << (7 - position % 8);
+  };
+  write(0x0b77, 16);
+  write(0, 16);  // CRC1, filled below.
+  write(0, 8);   // 48 kHz, 32 kbit/s.
+  write(8, 5);   // bsid.
+  write(0, 3);   // bsmod.
+  write(7, 3);   // Five full-bandwidth channels.
+  write(0, 4);   // Center and surround mix levels.
+  write(1, 1);   // LFE.
+  write(27, 5);
+  write(1, 1);  // Compression word present.
+  write(255, 8);
+  write(0, 2);   // No language or production information.
+  write(3, 2);   // Copyright and original.
+  write(0, 3);   // No timecodes or additional BSI.
+  write(0, 5);   // Block switching.
+  write(31, 5);  // Dither flags.
+  write(dynamic_range, 1);
+  if (dynamic_range)
+    write(0, 8);
+  write(3, 2);   // Coupling strategy present and enabled.
+  write(31, 5);  // All channels coupled.
+  write(6, 4);
+  write(10, 4);
+  write(0x16, 6);  // Four coupling bands.
+  for (int channel = 0; channel < 5; ++channel) {
+    write(1, 1);
+    write(2, 2);  // Master coordinate, deliberately not the Apple sample value.
+    for (int band = 0; band < 4; ++band)
+      write(coordinate, 8);
+  }
+  SetAc3Crc(&frame);
+  return frame;
+}
+
+class PackedAudioIvRecoveryTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    for (int i = 0; i < 16; ++i) {
+      key_.key.push_back(7 + 13 * i);
+      iv_.push_back(251 - 7 * i);
+    }
+    EXPECT_CALL(key_source_, GetKey(std::string(), _))
+        .WillRepeatedly(Invoke([this](const std::string&, EncryptionKey* key) {
+          *key = key_;
+          return Status::OK;
+        }));
+    Init();
+  }
+
+  void Init() {
+    parser_.Init(
+        MediaParser::InitCB(),
+        [this](uint32_t, std::shared_ptr<MediaSample> sample) {
+          samples_.emplace_back(sample->data(),
+                                sample->data() + sample->data_size());
+          return true;
+        },
+        MediaParser::NewTextSampleCB(), &key_source_);
+  }
+
+  std::vector<uint8_t> Segment(const std::vector<uint8_t>& frame,
+                               int64_t timestamp = 90000) {
+    std::vector<uint8_t> segment =
+        MakePackedAc3Segment(MakeAudioDescription("zac3"), timestamp);
+    segment.resize(segment.size() - MakeAc3Frame().size());
+    std::vector<uint8_t> encrypted(frame);
+    AesCbcEncryptor encryptor(kNoPadding, AesCryptor::kUseConstantIv);
+    EXPECT_TRUE(encryptor.InitializeWithIv(key_.key, iv_));
+    EXPECT_TRUE(encryptor.Crypt(encrypted.data() + 16,
+                                ((encrypted.size() - 16) / 16) * 16,
+                                encrypted.data() + 16));
+    segment.insert(segment.end(), encrypted.begin(), encrypted.end());
+    return segment;
+  }
+
+  PackedAudioParser parser_;
+  MockKeySource key_source_;
+  EncryptionKey key_;
+  std::vector<uint8_t> iv_;
+  std::vector<std::vector<uint8_t>> samples_;
+};
+
+TEST_F(PackedAudioIvRecoveryTest, RecoversArbitraryIvAcrossOneByteChunks) {
+  for (uint8_t coordinate : {0x31, 0x78, 0xf0}) {
+    Init();
+    samples_.clear();
+    const auto frame = MakeRecoverableAc3Frame(coordinate, coordinate == 0x78);
+    const auto segment = Segment(frame);
+    for (size_t i = 0; i < segment.size(); ++i)
+      ASSERT_TRUE(parser_.Parse(segment.data() + i, 1));
+    ASSERT_TRUE(parser_.Flush());
+    ASSERT_EQ(1u, samples_.size());
+    EXPECT_EQ(frame, samples_[0]);
+  }
+}
+
+TEST_F(PackedAudioIvRecoveryTest, ReusesRecoveredIvForSameKeyAcrossId3Tags) {
+  const auto first_frame = MakeRecoverableAc3Frame();
+  auto second_frame = first_frame;
+  second_frame[20] ^= 4;  // The later frame has no uniform coordinate pattern.
+  SetAc3Crc(&second_frame);
+  auto segment = Segment(first_frame);
+  const auto second = Segment(second_frame, 92880);
+  segment.insert(segment.end(), second.begin(), second.end());
+  ASSERT_TRUE(parser_.Parse(segment.data(), static_cast<int>(segment.size())));
+  ASSERT_TRUE(parser_.Flush());
+  EXPECT_EQ((std::vector<std::vector<uint8_t>>{first_frame, second_frame}),
+            samples_);
+}
+
+TEST_F(PackedAudioIvRecoveryTest, Recovers44100HzFrameWithClearTrailingBytes) {
+  auto frame = MakeRecoverableAc3Frame();
+  frame.resize(138);
+  frame[4] = 0x40;
+  frame[130] = 0xa5;
+  SetAc3Crc(&frame);
+  const auto segment = Segment(frame);
+  ASSERT_TRUE(parser_.Parse(segment.data(), static_cast<int>(segment.size())));
+  ASSERT_TRUE(parser_.Flush());
+  ASSERT_EQ(1u, samples_.size());
+  EXPECT_EQ(frame, samples_[0]);
+}
+
+TEST_F(PackedAudioIvRecoveryTest, ExplicitIvOverridesPreviouslyRecoveredIv) {
+  const auto first = Segment(MakeRecoverableAc3Frame());
+  ASSERT_TRUE(parser_.Parse(first.data(), static_cast<int>(first.size())));
+  iv_[0] ^= 0x55;
+  key_.iv = iv_;
+  auto frame = MakeRecoverableAc3Frame();
+  frame[20] ^= 4;
+  SetAc3Crc(&frame);
+  const auto second = Segment(frame, 92880);
+  ASSERT_TRUE(parser_.Parse(second.data(), static_cast<int>(second.size())));
+  ASSERT_TRUE(parser_.Flush());
+  ASSERT_EQ(2u, samples_.size());
+  EXPECT_EQ(frame, samples_[1]);
+}
+
+TEST_F(PackedAudioIvRecoveryTest, RejectsMissingPatternWithoutEmittingAudio) {
+  auto frame = MakeRecoverableAc3Frame();
+  frame[15] ^= 1;
+  SetAc3Crc(&frame);
+  const auto segment = Segment(frame);
+  EXPECT_FALSE(parser_.Parse(segment.data(), static_cast<int>(segment.size())));
+  EXPECT_TRUE(samples_.empty());
+}
+
+TEST_F(PackedAudioIvRecoveryTest, RejectsWrongKeyWithoutEmittingAudio) {
+  const auto segment = Segment(MakeRecoverableAc3Frame());
+  key_.key[0] ^= 1;
+  EXPECT_FALSE(parser_.Parse(segment.data(), static_cast<int>(segment.size())));
+  EXPECT_TRUE(samples_.empty());
+}
+
+TEST_F(PackedAudioIvRecoveryTest, RejectsCandidateWithInvalidCrc1) {
+  auto segment = Segment(MakeRecoverableAc3Frame());
+  segment[segment.size() - 128 + 2] ^= 1;
+  EXPECT_FALSE(parser_.Parse(segment.data(), static_cast<int>(segment.size())));
+  EXPECT_TRUE(samples_.empty());
+}
+
+TEST_F(PackedAudioIvRecoveryTest, RejectsCorruptionAfterIvRecovery) {
+  const auto first = Segment(MakeRecoverableAc3Frame());
+  ASSERT_TRUE(parser_.Parse(first.data(), static_cast<int>(first.size())));
+  auto second = Segment(MakeRecoverableAc3Frame(), 92880);
+  second.back() ^= 1;
+  EXPECT_FALSE(parser_.Parse(second.data(), static_cast<int>(second.size())));
+  EXPECT_EQ(1u, samples_.size());
+}
+
+TEST_F(PackedAudioIvRecoveryTest, DoesNotReuseIvAfterFlushOrInit) {
+  for (bool reinitialize : {false, true}) {
+    Init();
+    const auto first = Segment(MakeRecoverableAc3Frame());
+    ASSERT_TRUE(parser_.Parse(first.data(), static_cast<int>(first.size())));
+    if (reinitialize)
+      Init();
+    else
+      ASSERT_TRUE(parser_.Flush());
+    auto frame = MakeRecoverableAc3Frame();
+    frame[15] ^= 1;
+    SetAc3Crc(&frame);
+    const auto second = Segment(frame, 0);
+    EXPECT_FALSE(parser_.Parse(second.data(), static_cast<int>(second.size())));
+  }
+}
+
+TEST_F(PackedAudioIvRecoveryTest, RecoversAgainWhenActualKeyChanges) {
+  const auto first = Segment(MakeRecoverableAc3Frame());
+  ASSERT_TRUE(parser_.Parse(first.data(), static_cast<int>(first.size())));
+  key_.key[0] ^= 1;
+  iv_[1] ^= 0x3c;
+  const auto frame = MakeRecoverableAc3Frame(0x62);
+  const auto second = Segment(frame, 92880);
+  ASSERT_TRUE(parser_.Parse(second.data(), static_cast<int>(second.size())));
+  ASSERT_TRUE(parser_.Flush());
+  ASSERT_EQ(2u, samples_.size());
+  EXPECT_EQ(frame, samples_[1]);
+}
+
 TEST(PackedAudioParserTest, EmitsClearAc3FrameAcrossInputChunks) {
   const std::vector<uint8_t> segment = MakePackedAc3Segment("");
   const std::vector<uint8_t> expected_frame = MakeAc3Frame();
@@ -127,6 +372,7 @@ TEST(PackedAudioParserTest, EmitsClearAc3FrameAcrossInputChunks) {
   for (size_t index = 0; index < segment.size(); ++index)
     ASSERT_TRUE(parser.Parse(segment.data() + index, 1));
   ASSERT_TRUE(parser.Flush());
+  EXPECT_TRUE(parser.Flush());
 
   ASSERT_EQ(1u, streams.size());
   EXPECT_EQ(kCodecAC3, streams[0]->codec());
@@ -255,7 +501,7 @@ TEST(PackedAudioParserTest, UnwrapsThirtyThreeBitTimestampRollover) {
   EXPECT_EQ((1LL << 33) + 200, samples[1]->pts());
 }
 
-TEST(PackedAudioParserTest, RejectsEncryptedAc3WithoutAnExplicitIv) {
+TEST(PackedAudioParserTest, RejectsEncryptedAc3WithoutIvOrRecoverablePattern) {
   const std::vector<uint8_t> segment =
       MakePackedAc3Segment(MakeAudioDescription("zac3"));
 

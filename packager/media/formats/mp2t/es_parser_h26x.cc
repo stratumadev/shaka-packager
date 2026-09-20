@@ -10,10 +10,13 @@
 #include <absl/log/log.h>
 
 #include <packager/macros/logging.h>
+#include <packager/media/base/aes_cryptor.h>
+#include <packager/media/base/buffer_writer.h>
 #include <packager/media/base/media_sample.h>
 #include <packager/media/base/offset_byte_queue.h>
 #include <packager/media/base/timestamp.h>
 #include <packager/media/base/video_stream_info.h>
+#include <packager/media/codecs/avc_decoder_configuration_record.h>
 #include <packager/media/codecs/h26x_byte_to_unit_stream_converter.h>
 #include <packager/media/formats/mp2t/mp2t_common.h>
 
@@ -33,12 +36,16 @@ EsParserH26x::EsParserH26x(
     Nalu::CodecType type,
     std::unique_ptr<H26xByteToUnitStreamConverter> stream_converter,
     uint32_t pid,
-    const EmitSampleCB& emit_sample_cb)
+    const EmitSampleCB& emit_sample_cb,
+    std::unique_ptr<AesCryptor> sample_aes_decryptor,
+    std::unique_ptr<H264SampleAesIvRecovery> iv_recovery)
     : EsParser(pid),
       emit_sample_cb_(emit_sample_cb),
       type_(type),
       es_queue_(new media::OffsetByteQueue()),
-      stream_converter_(std::move(stream_converter)) {}
+      stream_converter_(std::move(stream_converter)),
+      sample_aes_decryptor_(std::move(sample_aes_decryptor)),
+      iv_recovery_(std::move(iv_recovery)) {}
 
 EsParserH26x::~EsParserH26x() {}
 
@@ -46,6 +53,13 @@ bool EsParserH26x::Parse(const uint8_t* buf,
                          int size,
                          int64_t pts,
                          int64_t dts) {
+  if (iv_recovery_ && iv_recovery_->iv().empty()) {
+    iv_recovery_bytes_ += size;
+    if (iv_recovery_bytes_ > 4 * 1024 * 1024) {
+      LOG(ERROR) << "SAMPLE-AES AVC IV recovery exceeded its input limit.";
+      return false;
+    }
+  }
   // Note: Parse is invoked each time a PES packet has been reassembled.
   // Unfortunately, a PES packet does not necessarily map
   // to an h264/h265 access unit, although the HLS recommendation is to use one
@@ -123,6 +137,32 @@ void EsParserH26x::Reset() {
   pending_sample_ = std::shared_ptr<MediaSample>();
   pending_sample_duration_ = 0;
   waiting_for_key_frame_ = true;
+  iv_recovery_bytes_ = 0;
+  if (iv_recovery_)
+    iv_recovery_->Reset();
+}
+
+bool EsParserH26x::SetSampleAesDecryptor(
+    std::unique_ptr<AesCryptor> decryptor,
+    std::unique_ptr<H264SampleAesIvRecovery> iv_recovery) {
+  const bool waiting_for_key_frame = waiting_for_key_frame_;
+  // Discard the synthetic AUDs added by Flush without resetting the derived
+  // parser's parameter sets or requiring a new key frame.
+  EsParserH26x::Reset();
+  waiting_for_key_frame_ = waiting_for_key_frame;
+  sample_aes_decryptor_ = std::move(decryptor);
+  iv_recovery_ = std::move(iv_recovery);
+  if (iv_recovery_) {
+    // A protection change may not repeat the SPS/PPS from the clear lead.
+    std::vector<uint8_t> bytes;
+    if (stream_converter_->GetDecoderConfigurationRecord(&bytes)) {
+      AVCDecoderConfigurationRecord config;
+      RCHECK(config.Parse(bytes));
+      for (size_t i = 0; i < config.nalu_count(); ++i)
+        RCHECK(iv_recovery_->ProcessNalu(config.nalu(i)));
+    }
+  }
+  return true;
 }
 
 bool EsParserH26x::SearchForNalu(uint64_t* position, Nalu* nalu) {
@@ -190,6 +230,14 @@ bool EsParserH26x::ParseInternal() {
   Nalu nalu;
   VideoSliceInfo video_slice_info;
   while (SearchForNalu(&position, &nalu)) {
+    if (iv_recovery_ && iv_recovery_->iv().empty()) {
+      RCHECK(iv_recovery_->ProcessNalu(nalu));
+      if (!iv_recovery_->iv().empty()) {
+        RCHECK(sample_aes_decryptor_->SetIv(iv_recovery_->iv()));
+        LOG(WARNING) << "SAMPLE-AES AVC IV was reconstructed from matching "
+                        "CABAC evidence in independent slices.";
+      }
+    }
     // ITU H.264 sec. 7.4.1.2.3
     // H264: The first of the NAL units with |can_start_access_unit() == true|
     //   after the last VCL NAL unit of a primary coded picture specifies the
@@ -204,7 +252,18 @@ bool EsParserH26x::ParseInternal() {
         next_access_unit_position_set_ = true;
         next_access_unit_position_ = position;
       }
-      RCHECK(ProcessNalu(nalu, &video_slice_info));
+      if (sample_aes_decryptor_) {
+        std::vector<uint8_t> clear_data;
+        RCHECK(DecryptNalu(nalu, &clear_data));
+        if (iv_recovery_ && iv_recovery_->iv().empty() && nalu.is_vcl())
+          clear_data.resize(std::min(clear_data.size(), size_t{32}));
+        Nalu clear_nalu;
+        RCHECK(
+            clear_nalu.Initialize(type_, clear_data.data(), clear_data.size()));
+        RCHECK(ProcessNalu(clear_nalu, &video_slice_info));
+      } else {
+        RCHECK(ProcessNalu(nalu, &video_slice_info));
+      }
       if (nalu.is_vcl() && !video_slice_info.valid) {
         // This could happen only if decoder config is not available yet. Drop
         // this frame.
@@ -264,6 +323,36 @@ bool EsParserH26x::ParseInternal() {
   return true;
 }
 
+bool EsParserH26x::DecryptNalu(const Nalu& nalu, std::vector<uint8_t>* output) {
+  const size_t size = nalu.header_size() + nalu.payload_size();
+  const uint8_t* data = nalu.data();
+  output->assign(data, data + size);
+  if (type_ != Nalu::kH264 ||
+      (nalu.type() != Nalu::H264_IDRSlice &&
+       nalu.type() != Nalu::H264_NonIDRSlice) ||
+      size <= 48)
+    return true;
+
+  // SAMPLE-AES adds an outer layer of emulation prevention after encryption.
+  // Remove only that layer, retaining any original escaping in the plaintext.
+  output->clear();
+  size_t zeros = 0;
+  for (size_t i = 0; i < size; ++i) {
+    if (zeros == 2 && data[i] == 3 && (i + 1 == size || data[i + 1] <= 3)) {
+      zeros = 0;
+      continue;
+    }
+    output->push_back(data[i]);
+    zeros = data[i] == 0 ? zeros + 1 : 0;
+  }
+  if (output->size() <= 48)
+    return true;
+  // The pattern cryptor resets its constant IV for each NAL, encrypts one
+  // block, skips nine, and leaves a final isolated block unencrypted.
+  return sample_aes_decryptor_->Crypt(output->data() + 32, output->size() - 32,
+                                      output->data() + 32);
+}
+
 bool EsParserH26x::EmitCurrentAccessUnit() {
   if (current_video_slice_info_.valid) {
     if (current_video_slice_info_.is_key_frame)
@@ -284,6 +373,11 @@ bool EsParserH26x::EmitFrame(int64_t access_unit_pos,
                              int access_unit_size,
                              bool is_key_frame,
                              int pps_id) {
+  if (iv_recovery_ && iv_recovery_->iv().empty()) {
+    LOG(ERROR) << "SAMPLE-AES AVC requires an explicit IV: bounded CABAC "
+                  "recovery could not confirm one across independent slices.";
+    return false;
+  }
   // Get the access unit timing info.
   TimingDesc current_timing_desc = {kNoTimestamp, kNoTimestamp};
   while (!timing_desc_list_.empty() &&
@@ -309,6 +403,23 @@ bool EsParserH26x::EmitFrame(int64_t access_unit_pos,
           es, access_unit_size, &converted_frame)) {
     DLOG(ERROR) << "Failure to convert video frame to unit stream format.";
     return false;
+  }
+
+  if (sample_aes_decryptor_) {
+    BufferWriter clear_frame(converted_frame.size());
+    NaluReader reader(type_,
+                      H26xByteToUnitStreamConverter::kUnitStreamNaluLengthSize,
+                      converted_frame.data(), converted_frame.size());
+    Nalu nalu;
+    NaluReader::Result result;
+    while ((result = reader.Advance(&nalu)) == NaluReader::kOk) {
+      std::vector<uint8_t> clear_nalu;
+      RCHECK(DecryptNalu(nalu, &clear_nalu));
+      clear_frame.AppendInt(static_cast<uint32_t>(clear_nalu.size()));
+      clear_frame.AppendVector(clear_nalu);
+    }
+    RCHECK(result == NaluReader::kEOStream);
+    clear_frame.SwapBuffer(&converted_frame);
   }
 
   // Update the video decoder configuration if needed.

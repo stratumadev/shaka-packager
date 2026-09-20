@@ -98,6 +98,8 @@ class Mp2tMediaParser : public MediaParser {
   InitCB init_cb_;
   NewMediaSampleCB new_media_sample_cb_;
   NewTextSampleCB new_text_sample_cb_;
+  KeySource* decryption_key_source_ = nullptr;
+  bool decryption_error_ = false;
 
   bool sbr_in_mimetype_;
 

@@ -9,6 +9,7 @@
 #include <absl/log/log.h>
 
 #include <packager/macros/logging.h>
+#include <packager/media/base/aes_cryptor.h>
 #include <packager/media/base/media_sample.h>
 #include <packager/media/base/timestamp.h>
 #include <packager/media/base/video_stream_info.h>
@@ -23,12 +24,16 @@ namespace mp2t {
 
 EsParserH264::EsParserH264(uint32_t pid,
                            const NewStreamInfoCB& new_stream_info_cb,
-                           const EmitSampleCB& emit_sample_cb)
+                           const EmitSampleCB& emit_sample_cb,
+                           std::unique_ptr<AesCryptor> sample_aes_decryptor,
+                           std::unique_ptr<H264SampleAesIvRecovery> iv_recovery)
     : EsParserH26x(Nalu::kH264,
                    std::unique_ptr<H26xByteToUnitStreamConverter>(
                        new H264ByteToUnitStreamConverter()),
                    pid,
-                   emit_sample_cb),
+                   emit_sample_cb,
+                   std::move(sample_aes_decryptor),
+                   std::move(iv_recovery)),
       new_stream_info_cb_(new_stream_info_cb),
       decoder_config_check_pending_(false),
       h264_parser_(new H264Parser()) {}

@@ -13,10 +13,15 @@
 #include <gtest/gtest.h>
 
 #include <packager/macros/logging.h>
+#include <packager/media/base/aes_decryptor.h>
+#include <packager/media/base/aes_encryptor.h>
+#include <packager/media/base/aes_pattern_cryptor.h>
+#include <packager/media/base/buffer_writer.h>
 #include <packager/media/base/media_sample.h>
 #include <packager/media/base/timestamp.h>
 #include <packager/media/base/video_stream_info.h>
 #include <packager/media/codecs/h264_parser.h>
+#include <packager/media/codecs/nal_unit_to_byte_stream_converter.h>
 #include <packager/media/test/test_data_util.h>
 
 namespace shaka {
@@ -213,6 +218,55 @@ TEST_F(EsParserH264Test, OneAccessUnitPerPes) {
   ProcessPesPackets(pes_packets);
   EXPECT_EQ(sample_count(), access_units_.size());
   EXPECT_TRUE(first_frame_is_key_frame());
+}
+
+TEST_F(EsParserH264Test, SeedsIvRecoveryFromClearDecoderConfiguration) {
+  const auto data =
+      ReadTestDataFile("h264-sample-aes-recovery-1920x256-qp13.h264");
+  ASSERT_FALSE(data.empty());
+  EsParserH264 parser(
+      0, [](std::shared_ptr<StreamInfo>) {},
+      [](std::shared_ptr<MediaSample>) {});
+  ASSERT_TRUE(parser.Parse(data.data(), static_cast<int>(data.size()), 0, 0));
+  ASSERT_TRUE(parser.Flush());
+
+  const std::vector<uint8_t> key(16, 0x11);
+  const std::vector<uint8_t> iv(16, 0x22);
+  auto recovery = std::make_unique<H264SampleAesIvRecovery>(key);
+  H264SampleAesIvRecovery* recovery_state = recovery.get();
+  auto decryptor = std::make_unique<AesPatternCryptor>(
+      1, 9, AesPatternCryptor::kSkipIfCryptByteBlockRemaining,
+      AesCryptor::kUseConstantIv,
+      std::make_unique<AesCbcDecryptor>(kNoPadding));
+  ASSERT_TRUE(decryptor->InitializeWithIv(key, std::vector<uint8_t>(16)));
+  ASSERT_TRUE(
+      parser.SetSampleAesDecryptor(std::move(decryptor), std::move(recovery)));
+
+  // The protection transition must supply the SPS/PPS from the clear lead.
+  // Only encrypted slices, with no repeated parameter sets, reach recovery.
+  NaluReader reader(Nalu::kH264, kIsAnnexbByteStream, data.data(), data.size());
+  Nalu nalu;
+  while (reader.Advance(&nalu) == NaluReader::kOk) {
+    if (!nalu.is_vcl())
+      continue;
+    std::vector<uint8_t> encrypted(
+        nalu.data(), nalu.data() + nalu.header_size() + nalu.payload_size());
+    ASSERT_GT(encrypted.size(), 48u);
+    AesPatternCryptor encryptor(
+        1, 9, AesPatternCryptor::kSkipIfCryptByteBlockRemaining,
+        AesCryptor::kUseConstantIv,
+        std::make_unique<AesCbcEncryptor>(kNoPadding));
+    ASSERT_TRUE(encryptor.InitializeWithIv(key, iv));
+    ASSERT_TRUE(encryptor.Crypt(encrypted.data() + 32, encrypted.size() - 32,
+                                encrypted.data() + 32));
+    BufferWriter escaped;
+    EscapeNalByteSequence(encrypted.data(), encrypted.size(), &escaped);
+    Nalu encrypted_nalu;
+    ASSERT_TRUE(encrypted_nalu.Initialize(Nalu::kH264, escaped.Buffer(),
+                                          escaped.Size()));
+    ASSERT_TRUE(recovery_state->ProcessNalu(encrypted_nalu));
+  }
+  EXPECT_EQ(iv, recovery_state->iv());
 }
 
 TEST_F(EsParserH264Test, NonAlignedPesPacket) {

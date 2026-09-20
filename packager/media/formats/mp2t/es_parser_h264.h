@@ -27,7 +27,9 @@ class EsParserH264 : public EsParserH26x {
  public:
   EsParserH264(uint32_t pid,
                const NewStreamInfoCB& new_stream_info_cb,
-               const EmitSampleCB& emit_sample_cb);
+               const EmitSampleCB& emit_sample_cb,
+               std::unique_ptr<AesCryptor> sample_aes_decryptor = nullptr,
+               std::unique_ptr<H264SampleAesIvRecovery> iv_recovery = nullptr);
   ~EsParserH264() override;
 
   // EsParserH26x implementation override.

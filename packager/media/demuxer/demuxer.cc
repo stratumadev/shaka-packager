@@ -22,9 +22,7 @@
 #include <packager/media/base/key_source.h>
 #include <packager/media/base/media_sample.h>
 #include <packager/media/base/stream_info.h>
-#if !defined(SHAKA_DECRYPT)
 #include <packager/media/formats/mp2t/mp2t_media_parser.h>
-#endif
 #include <packager/media/formats/mp4/mp4_media_parser.h>
 #include <packager/media/formats/packed_audio/packed_audio_parser.h>
 #if !defined(SHAKA_DECRYPT)
@@ -198,10 +196,10 @@ Status Demuxer::InitializeParser() {
     case CONTAINER_AC3:
       parser_.reset(new PackedAudioParser());
       break;
-#if !defined(SHAKA_DECRYPT)
     case CONTAINER_MPEG2TS:
       parser_.reset(new mp2t::Mp2tMediaParser());
       break;
+#if !defined(SHAKA_DECRYPT)
       // Widevine classic (WVM) is derived from MPEG2PS. We do not support
       // non-WVM MPEG2PS file, thus we do not differentiate between the two.
       // Every MPEG2PS file is assumed to be WVM file. If it turns out not the

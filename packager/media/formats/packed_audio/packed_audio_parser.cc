@@ -7,6 +7,7 @@
 #include <packager/media/formats/packed_audio/packed_audio_parser.h>
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <string>
 #include <utility>
@@ -17,6 +18,7 @@
 #include <packager/media/base/aes_decryptor.h>
 #include <packager/media/base/audio_stream_info.h>
 #include <packager/media/base/audio_timestamp_helper.h>
+#include <packager/media/base/bit_reader.h>
 #include <packager/media/base/buffer_reader.h>
 #include <packager/media/base/fourccs.h>
 #include <packager/media/base/key_source.h>
@@ -53,6 +55,132 @@ bool StartsWithId3(const std::vector<uint8_t>& buffer, size_t position) {
          buffer[position + 1] == 'D' && buffer[position + 2] == '3';
 }
 
+uint16_t Ac3Crc(const uint8_t* data, size_t size) {
+  static const std::array<uint16_t, 256> table = [] {
+    std::array<uint16_t, 256> values{};
+    for (size_t i = 0; i < values.size(); ++i) {
+      uint16_t crc = i << 8;
+      for (int bit = 0; bit < 8; ++bit)
+        crc = (crc << 1) ^ ((crc & 0x8000) ? 0x8005 : 0);
+      values[i] = crc;
+    }
+    return values;
+  }();
+  uint16_t crc = 0;
+  for (size_t i = 0; i < size; ++i)
+    crc = (crc << 8) ^ table[(crc >> 8) ^ data[i]];
+  return crc;
+}
+
+bool HasValidAc3Crc(const std::vector<uint8_t>& frame) {
+  // AC-3 divides the frame in 16-bit words, including at 44.1 kHz.
+  const size_t split = ((frame.size() >> 2) + (frame.size() >> 4)) << 1;
+  return split > 2 && split < frame.size() &&
+         Ac3Crc(frame.data() + 2, split - 2) == 0 &&
+         Ac3Crc(frame.data() + split, frame.size() - split) == 0;
+}
+
+// A zero CBC IV only corrupts bytes 16..31 of SAMPLE-AES AC-3. Recover them
+// from uniform coupling coordinates observed on both sides, then require both
+// CRCs. This first-frame heuristic is best effort, not cryptographic
+// authentication; an explicit IV always takes precedence.
+bool RecoverAc3Iv(std::vector<uint8_t>* frame, std::vector<uint8_t>* iv) {
+  if (frame->size() < 32)
+    return false;
+  BitReader bits(frame->data(), kAc3LeadingClearBytes);
+  uint8_t channel_mode;
+  if (!bits.SkipBits(48) || !bits.ReadBits(3, &channel_mode) ||
+      channel_mode < 2)
+    return false;
+  if ((channel_mode & 1) && !bits.SkipBits(2))
+    return false;
+  if ((channel_mode & 4) && !bits.SkipBits(2))
+    return false;
+  if (channel_mode == 2 && !bits.SkipBits(2))
+    return false;
+  // LFE, dialnorm, compression, language, audio production information,
+  // copyright/original flags, then timecodes (or alternate BSI fields).
+  if (!bits.SkipBits(6) || !bits.SkipBitsConditional(true, 8) ||
+      !bits.SkipBitsConditional(true, 8) ||
+      !bits.SkipBitsConditional(true, 7) || !bits.SkipBits(2) ||
+      !bits.SkipBitsConditional(true, 14) ||
+      !bits.SkipBitsConditional(true, 14))
+    return false;
+  bool additional_bsi;
+  if (!bits.ReadBits(1, &additional_bsi))
+    return false;
+  if (additional_bsi) {
+    uint8_t length;
+    if (!bits.ReadBits(6, &length) || !bits.SkipBits((length + 1) * 8))
+      return false;
+  }
+  constexpr uint8_t kFullBandwidthChannels[] = {2, 1, 2, 3, 3, 4, 4, 5};
+  const uint8_t channels = kFullBandwidthChannels[channel_mode];
+  bool coupling_strategy;
+  bool coupling_in_use;
+  if (!bits.SkipBits(channels * 2) ||  // Block switching and dither flags.
+      !bits.SkipBitsConditional(true, 8) ||
+      !bits.ReadBits(1, &coupling_strategy) || !coupling_strategy ||
+      !bits.ReadBits(1, &coupling_in_use) || !coupling_in_use)
+    return false;
+  size_t coupled_channels = 0;
+  for (size_t channel = 0; channel < channels; ++channel) {
+    bool coupled;
+    if (!bits.ReadBits(1, &coupled))
+      return false;
+    coupled_channels += coupled;
+  }
+  if (coupled_channels < 2 || (channel_mode == 2 && !bits.SkipBits(1)))
+    return false;
+  uint8_t begin;
+  uint8_t end;
+  if (!bits.ReadBits(4, &begin) || !bits.ReadBits(4, &end) || begin >= end + 3)
+    return false;
+  size_t bands = 1;
+  for (size_t subband = begin + 1; subband < end + 3; ++subband) {
+    bool combined;
+    if (!bits.ReadBits(1, &combined))
+      return false;
+    bands += !combined;
+  }
+  const size_t start = bits.bit_position();
+  bool coordinates_exist;
+  uint8_t master;
+  uint8_t coordinate;
+  if (!bits.ReadBits(1, &coordinates_exist) || !coordinates_exist ||
+      !bits.ReadBits(2, &master) || !bits.ReadBits(8, &coordinate))
+    return false;
+
+  const size_t channel_bits = 3 + bands * 8;
+  const size_t finish = start + coupled_channels * channel_bits;
+  // Require at least a full coordinate on each side of the unknown block.
+  if (finish < 264 || finish > frame->size() * 8)
+    return false;
+  std::vector<uint8_t> corrected(*frame);
+  for (size_t position = start; position < finish; ++position) {
+    const size_t relative = (position - start) % channel_bits;
+    const uint8_t expected = relative == 0 ? 1
+                             : relative < 3
+                                 ? (master >> (2 - relative)) & 1
+                                 : (coordinate >> (7 - (relative - 3) % 8)) & 1;
+    const uint8_t mask = 1 << (7 - position % 8);
+    if (position < 128 || position >= 256) {
+      if (((*frame)[position / 8] & mask) != (expected ? mask : 0))
+        return false;
+    } else {
+      corrected[position / 8] =
+          (corrected[position / 8] & ~mask) | (expected ? mask : 0);
+    }
+  }
+  if (!HasValidAc3Crc(corrected))
+    return false;
+  iv->resize(16);
+  for (size_t i = 0; i < iv->size(); ++i)
+    (*iv)[i] = (*frame)[16 + i] ^ corrected[16 + i];
+  *frame = std::move(corrected);
+  return true;
+}
+
 }  // namespace
 
 PackedAudioParser::PackedAudioParser() = default;
@@ -68,6 +196,9 @@ void PackedAudioParser::Init(const InitCB& init_cb,
   buffer_.clear();
   buffer_position_ = 0;
   decryptor_.reset();
+  decryption_key_.clear();
+  recovered_iv_.clear();
+  recover_missing_iv_ = false;
   timestamp_helper_.reset();
   audio_config_.clear();
   initialized_ = false;
@@ -98,10 +229,14 @@ bool PackedAudioParser::Flush() {
     LOG(ERROR) << "Truncated packed AC-3 segment.";
     return false;
   }
-  const bool result = have_segment_ && initialized_;
+  // Demuxer may flush twice for inputs smaller than its probe buffer.
+  const bool result = initialized_;
   buffer_.clear();
   buffer_position_ = 0;
   decryptor_.reset();
+  decryption_key_.clear();
+  recovered_iv_.clear();
+  recover_missing_iv_ = false;
   have_segment_ = false;
   segment_is_encrypted_ = false;
   next_timestamp_ = 0;
@@ -241,10 +376,17 @@ bool PackedAudioParser::ParseId3Tag() {
                  << status.ToString();
       return false;
     }
-    if (key.iv.size() != 16) {
-      LOG(ERROR) << "Encrypted packed AC-3 requires an explicit 16-byte IV.";
+    if (!key.iv.empty() && key.iv.size() != 16) {
+      LOG(ERROR) << "Packed AC-3 IV must contain 16 bytes when supplied.";
       return false;
     }
+    if (key.key != decryption_key_ || !key.iv.empty())
+      recovered_iv_.clear();
+    decryption_key_ = key.key;
+    recover_missing_iv_ = key.iv.empty();
+    if (recover_missing_iv_)
+      key.iv =
+          recovered_iv_.empty() ? std::vector<uint8_t>(16, 0) : recovered_iv_;
     decryptor_ = std::make_unique<AesCbcDecryptor>(kNoPadding,
                                                    AesCryptor::kUseConstantIv);
     if (!decryptor_->InitializeWithIv(key.key, key.iv)) {
@@ -253,6 +395,9 @@ bool PackedAudioParser::ParseId3Tag() {
     }
   } else {
     decryptor_.reset();
+    decryption_key_.clear();
+    recovered_iv_.clear();
+    recover_missing_iv_ = false;
   }
 
   buffer_position_ += tag_size;
@@ -355,9 +500,26 @@ bool PackedAudioParser::DecryptAc3Frame(std::vector<uint8_t>* frame) {
       ((frame->size() - kAc3LeadingClearBytes) / 16) * 16;
   if (encrypted_size == 0)
     return true;
-  return decryptor_->Crypt(frame->data() + kAc3LeadingClearBytes,
-                           encrypted_size,
-                           frame->data() + kAc3LeadingClearBytes);
+  if (!decryptor_->Crypt(frame->data() + kAc3LeadingClearBytes, encrypted_size,
+                         frame->data() + kAc3LeadingClearBytes))
+    return false;
+  if (recover_missing_iv_) {
+    if (recovered_iv_.empty()) {
+      if (!RecoverAc3Iv(frame, &recovered_iv_) ||
+          !decryptor_->SetIv(recovered_iv_)) {
+        LOG(ERROR) << "Cannot recover missing packed AC-3 IV from the first "
+                      "frame: no matching coupling pattern with valid CRCs. "
+                      "Check the key or provide an explicit IV.";
+        return false;
+      }
+      LOG(WARNING) << "Recovered missing packed AC-3 IV from a repeated "
+                      "coupling pattern and CRCs; using best-effort recovery.";
+    } else if (!HasValidAc3Crc(*frame)) {
+      LOG(ERROR) << "Packed AC-3 CRC mismatch after IV recovery.";
+      return false;
+    }
+  }
+  return true;
 }
 
 }  // namespace media

@@ -65,7 +65,10 @@ void PrintUsage(const char* program) {
       << "Usage: " << program
       << " input=<file>,stream=<audio|video|n>,output=<file> "
          "--enable_raw_key_decryption --keys key_id=<kid>:key=<key>[:iv=<iv>]\n"
-      << "Encrypted HLS packed AC-3 requires the playlist IV and one key.\n";
+      << "Encrypted HLS packed AC-3 requires one key; an explicit IV is preferred.\n"
+      << "Without an IV, first-frame coupling-pattern recovery is attempted.\n"
+      << "SAMPLE-AES AVC in MPEG-TS requires one key; an explicit IV is preferred.\n"
+      << "Without an IV, bounded CABAC slice recovery is attempted.\n";
 }
 
 std::optional<DecryptStreamDescriptor> ParseStreamDescriptor(
@@ -221,7 +224,7 @@ Status Decrypt(const CommandLine& command_line) {
       std::make_shared<media::Demuxer>(command_line.stream.input);
   demuxer->set_input_format(command_line.stream.input_format);
 
-  // Packed audio has no in-band KID. A single supplied key is unambiguous;
+  // HLS SAMPLE-AES has no in-band KID. A single supplied key is unambiguous;
   // expose it under the default label while preserving lookup by its key ID.
   RawKeyParams raw_key = command_line.raw_key;
   if (raw_key.key_map.size() == 1) {

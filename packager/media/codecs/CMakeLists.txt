@@ -18,6 +18,7 @@ add_library(media_codecs STATIC
     es_descriptor.cc
     h264_byte_to_unit_stream_converter.cc
     h264_parser.cc
+    h264_sample_aes_iv_recovery.cc
     h265_byte_to_unit_stream_converter.cc
     h265_parser.cc
     h26x_bit_reader.cc
@@ -48,6 +49,7 @@ add_executable(media_codecs_unittest
     es_descriptor_unittest.cc
     h264_byte_to_unit_stream_converter_unittest.cc
     h264_parser_unittest.cc
+    h264_sample_aes_iv_recovery_unittest.cc
     h265_byte_to_unit_stream_converter_unittest.cc
     h265_parser_unittest.cc
     h26x_bit_reader_unittest.cc

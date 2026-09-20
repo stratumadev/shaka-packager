@@ -10,6 +10,9 @@
 #include <absl/log/check.h>
 
 #include <packager/macros/logging.h>
+#include <packager/media/base/aes_decryptor.h>
+#include <packager/media/base/aes_pattern_cryptor.h>
+#include <packager/media/base/key_source.h>
 #include <packager/media/base/media_sample.h>
 #include <packager/media/base/stream_info.h>
 #include <packager/media/base/text_sample.h>
@@ -82,6 +85,9 @@ class PidState {
   bool enable_;
   int continuity_counter_;
   std::shared_ptr<StreamInfo> config_;
+  TsStreamType stream_type_ = TsStreamType::kPesPrivateData;
+  // Owned by the PES section parser; retained for AVC protection changes.
+  EsParserH264* avc_parser_ = nullptr;
 };
 
 PidState::PidState(int pid,
@@ -173,10 +179,13 @@ void Mp2tMediaParser::Init(const InitCB& init_cb,
   init_cb_ = init_cb;
   new_media_sample_cb_ = new_media_sample_cb;
   new_text_sample_cb_ = new_text_sample_cb;
+  decryption_key_source_ = decryption_key_source;
+  decryption_error_ = false;
 }
 
 bool Mp2tMediaParser::Flush() {
   DVLOG(1) << "Mp2tMediaParser::Flush";
+  RCHECK(!decryption_error_);
 
   // Flush the buffers and reset the pids.
   for (const auto& pair : pids_) {
@@ -195,6 +204,7 @@ bool Mp2tMediaParser::Flush() {
 
 bool Mp2tMediaParser::Parse(const uint8_t* buf, int size) {
   DVLOG(2) << "Mp2tMediaParser::Parse size=" << size;
+  RCHECK(!decryption_error_);
 
   // Add the data to the parser state.
   ts_byte_queue_.Push(buf, size);
@@ -244,6 +254,7 @@ bool Mp2tMediaParser::Parse(const uint8_t* buf, int size) {
 
     if (it != pids_.end()) {
       RCHECK(it->second->PushTsPacket(*ts_packet));
+      RCHECK(!decryption_error_);
     } else {
       DVLOG(LOG_LEVEL_TS) << "Ignoring TS packet for pid: " << ts_packet->pid();
     }
@@ -292,8 +303,16 @@ void Mp2tMediaParser::RegisterPes(int pmt_pid,
                                   TsAudioType audio_type,
                                   const uint8_t* descriptor,
                                   size_t descriptor_length) {
-  if (pids_.count(pes_pid) != 0)
-    return;
+  auto previous = pids_.find(pes_pid);
+  if (previous != pids_.end()) {
+    const TsStreamType previous_type = previous->second->stream_type_;
+    if (previous_type == stream_type ||
+        (previous_type != TsStreamType::kAvc &&
+         previous_type != TsStreamType::kEncryptedAvc) ||
+        (stream_type != TsStreamType::kAvc &&
+         stream_type != TsStreamType::kEncryptedAvc))
+      return;
+  }
   DVLOG(1) << "RegisterPes:"
            << " pes_pid=" << pes_pid << " stream_type=" << std::hex
            << static_cast<int>(stream_type) << std::dec
@@ -304,6 +323,7 @@ void Mp2tMediaParser::RegisterPes(int pmt_pid,
   // Create a stream parser corresponding to the stream type.
   PidState::PidType pid_type = PidState::kPidVideoPes;
   std::unique_ptr<EsParser> es_parser;
+  EsParserH264* avc_parser = nullptr;
   auto on_new_stream = std::bind(&Mp2tMediaParser::OnNewStreamInfo, this,
                                  pes_pid, std::placeholders::_1);
   auto on_emit_media = std::bind(&Mp2tMediaParser::OnEmitMediaSample, this,
@@ -312,8 +332,58 @@ void Mp2tMediaParser::RegisterPes(int pmt_pid,
                                 pes_pid, std::placeholders::_1);
   switch (stream_type) {
     case TsStreamType::kAvc:
-      es_parser.reset(new EsParserH264(pes_pid, on_new_stream, on_emit_media));
+    case TsStreamType::kEncryptedAvc: {
+      std::unique_ptr<AesCryptor> decryptor;
+      std::unique_ptr<H264SampleAesIvRecovery> iv_recovery;
+      if (stream_type == TsStreamType::kEncryptedAvc) {
+        EncryptionKey key;
+        if (!decryption_key_source_ ||
+            !decryption_key_source_->GetKey(std::string(), &key).ok() ||
+            key.key.size() != 16 || (!key.iv.empty() && key.iv.size() != 16)) {
+          LOG(ERROR)
+              << "SAMPLE-AES AVC requires a 16-byte key and a 16-byte IV "
+                 "when one is provided.";
+          decryption_error_ = true;
+          return;
+        }
+        decryptor = std::make_unique<AesPatternCryptor>(
+            1, 9, AesPatternCryptor::kSkipIfCryptByteBlockRemaining,
+            AesCryptor::kUseConstantIv,
+            std::make_unique<AesCbcDecryptor>(kNoPadding));
+        if (key.iv.empty()) {
+          iv_recovery = std::make_unique<H264SampleAesIvRecovery>(key.key);
+          // Only the clear NAL prefix is parsed with this temporary state.
+          // No access unit may be emitted until recovery confirms an IV.
+          key.iv.resize(16);
+        }
+        if (!decryptor->InitializeWithIv(key.key, key.iv)) {
+          LOG(ERROR) << "Unable to initialize SAMPLE-AES AVC decryption.";
+          decryption_error_ = true;
+          return;
+        }
+      }
+      if (previous != pids_.end()) {
+        // Finish the previous protection mode without resetting parameter sets:
+        // they may only have been supplied in the clear lead.
+        if (!previous->second->section_parser_->Flush() ||
+            !EmitRemainingSamples()) {
+          decryption_error_ = true;
+          return;
+        }
+        if (!previous->second->avc_parser_->SetSampleAesDecryptor(
+                std::move(decryptor), std::move(iv_recovery))) {
+          decryption_error_ = true;
+          return;
+        }
+        previous->second->stream_type_ = stream_type;
+        return;
+      }
+      avc_parser =
+          new EsParserH264(pes_pid, on_new_stream, on_emit_media,
+                           std::move(decryptor), std::move(iv_recovery));
+      es_parser.reset(avc_parser);
       break;
+    }
     case TsStreamType::kHevc:
       es_parser.reset(new EsParserH265(pes_pid, on_new_stream, on_emit_media));
       break;
@@ -353,6 +423,8 @@ void Mp2tMediaParser::RegisterPes(int pmt_pid,
       new TsSectionPes(std::move(es_parser)));
   std::unique_ptr<PidState> pes_pid_state(
       new PidState(pes_pid, pid_type, std::move(pes_section_parser)));
+  pes_pid_state->stream_type_ = stream_type;
+  pes_pid_state->avc_parser_ = avc_parser;
   pes_pid_state->Enable();
   pids_.emplace(pes_pid, std::move(pes_pid_state));
 

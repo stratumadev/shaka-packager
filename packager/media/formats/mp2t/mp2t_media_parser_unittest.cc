@@ -11,13 +11,19 @@
 #include <absl/log/log.h>
 #include <gtest/gtest.h>
 
+#include <packager/file.h>
 #include <packager/macros/logging.h>
 #include <packager/media/base/audio_stream_info.h>
+#include <packager/media/base/buffer_writer.h>
 #include <packager/media/base/media_sample.h>
+#include <packager/media/base/raw_key_source.h>
 #include <packager/media/base/stream_info.h>
 #include <packager/media/base/timestamp.h>
 #include <packager/media/base/video_stream_info.h>
+#include <packager/media/codecs/nalu_reader.h>
 #include <packager/media/formats/mp2t/mp2t_common.h>
+#include <packager/media/formats/mp2t/ts_packet.h>
+#include <packager/media/formats/mp4/mp4_media_parser.h>
 #include <packager/media/test/test_data_util.h>
 
 namespace shaka {
@@ -202,6 +208,192 @@ TEST_F(Mp2tMediaParserTest, PmtEsDescriptors) {
 
   auto* audio_info = static_cast<AudioStreamInfo*>(stream_map_[257].get());
   EXPECT_EQ(131600, audio_info->max_bitrate());
+}
+
+class SampleAesKeySource : public RawKeySource {
+ public:
+  SampleAesKeySource() {
+    // Public key and IV used by the repository's SAMPLE-AES fixtures.
+    key.key = {0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39,
+               0x30, 0x21, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37};
+    key.iv = {0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x30,
+              0,    0,    0,    0,    0,    0,    0,    0};
+  }
+
+  Status GetKey(const std::string& stream_label,
+                EncryptionKey* output) override {
+    EXPECT_TRUE(stream_label.empty());
+    *output = key;
+    return Status::OK;
+  }
+
+  EncryptionKey key;
+};
+
+class Mp2tSampleAesTest : public testing::Test {
+ protected:
+  void SetUp() override {
+    for (int segment = 1; segment <= 3; ++segment) {
+      std::string bytes;
+      ASSERT_TRUE(File::ReadFileToString(
+          GetAppTestDataFilePath("avc-ts-ac3-packed-audio-with-encryption/"
+                                 "bear-640x360-ac3-video-" +
+                                 std::to_string(segment) + ".ts")
+              .string()
+              .c_str(),
+          &bytes));
+      encrypted_ += bytes;
+      if (segment == 1)
+        clear_lead_size_ = bytes.size();
+    }
+  }
+
+  bool ParseEncrypted(KeySource* key_source, size_t chunk_size) {
+    Mp2tMediaParser parser;
+    parser.Init([](const std::vector<std::shared_ptr<StreamInfo>>&) {},
+                [this](uint32_t, std::shared_ptr<MediaSample> sample) {
+                  samples_.emplace_back(sample->data(),
+                                        sample->data() + sample->data_size());
+                  return true;
+                },
+                [](uint32_t, std::shared_ptr<TextSample>) { return false; },
+                key_source);
+    for (size_t offset = 0; offset < encrypted_.size(); offset += chunk_size) {
+      const size_t size = std::min(chunk_size, encrypted_.size() - offset);
+      if (!parser.Parse(
+              reinterpret_cast<const uint8_t*>(encrypted_.data() + offset),
+              static_cast<int>(size)))
+        return false;
+    }
+    return parser.Flush();
+  }
+
+  void ExpectOriginalSamples() {
+    std::string bytes;
+    ASSERT_TRUE(File::ReadFileToString(
+        GetAppTestDataFilePath("avc-ac3-ts-to-mp4/"
+                               "bear-640x360-ac3-video.mp4")
+            .string()
+            .c_str(),
+        &bytes));
+    mp4::MP4MediaParser parser;
+    std::vector<std::vector<uint8_t>> expected;
+    parser.Init([](const std::vector<std::shared_ptr<StreamInfo>>&) {},
+                [&expected](uint32_t, std::shared_ptr<MediaSample> sample) {
+                  expected.emplace_back(sample->data(),
+                                        sample->data() + sample->data_size());
+                  return true;
+                },
+                MediaParser::NewTextSampleCB(), nullptr);
+    ASSERT_TRUE(parser.Parse(reinterpret_cast<const uint8_t*>(bytes.data()),
+                             static_cast<int>(bytes.size())));
+    ASSERT_TRUE(parser.Flush());
+    ASSERT_FALSE(expected.empty());
+    ASSERT_EQ(expected.size(), samples_.size());
+    for (size_t i = 0; i < expected.size(); ++i)
+      EXPECT_TRUE(expected[i] == samples_[i]) << "Sample " << i;
+  }
+
+  SampleAesKeySource key_source_;
+  std::string encrypted_;
+  std::vector<std::vector<uint8_t>> samples_;
+  size_t clear_lead_size_ = 0;
+};
+
+TEST_F(Mp2tSampleAesTest, DecryptsAvcToOriginalSamples) {
+  ASSERT_TRUE(ParseEncrypted(&key_source_, encrypted_.size()));
+  ExpectOriginalSamples();
+}
+
+TEST_F(Mp2tSampleAesTest, DecryptsAcrossUnalignedPacketAndPesBoundaries) {
+  ASSERT_TRUE(ParseEncrypted(&key_source_, 17));
+  ExpectOriginalSamples();
+}
+
+TEST_F(Mp2tSampleAesTest, KeepsParameterSetsAcrossEncryptionTransition) {
+  // Replace repeated SPS/PPS in the encrypted segments with valid filler NALs.
+  // Keep packet lengths and timestamps intact; only the clear lead supplies
+  // the decoder configuration needed for the rest of the stream.
+  std::vector<uint8_t> elementary_stream;
+  std::vector<size_t> source_offsets;
+  const auto* bytes = reinterpret_cast<const uint8_t*>(encrypted_.data());
+  int video_pid = -1;
+  for (size_t offset = clear_lead_size_; offset + 188 <= encrypted_.size();
+       offset += 188) {
+    std::unique_ptr<TsPacket> packet(TsPacket::Parse(bytes + offset, 188));
+    ASSERT_TRUE(packet);
+    const uint8_t* payload = packet->payload();
+    size_t skip = 0;
+    if (packet->payload_unit_start_indicator()) {
+      if (packet->payload_size() < 9 || payload[0] != 0 || payload[1] != 0 ||
+          payload[2] != 1 || (payload[3] & 0xf0) != 0xe0)
+        continue;
+      video_pid = packet->pid();
+      skip = 9 + payload[8];
+    }
+    if (packet->pid() != video_pid)
+      continue;
+    for (size_t i = skip; i < static_cast<size_t>(packet->payload_size());
+         ++i) {
+      elementary_stream.push_back(payload[i]);
+      source_offsets.push_back(payload + i - bytes);
+    }
+  }
+  NaluReader reader(Nalu::kH264, 0, elementary_stream.data(),
+                    elementary_stream.size());
+  Nalu nalu;
+  size_t replaced = 0;
+  while (reader.Advance(&nalu) == NaluReader::kOk) {
+    if (nalu.type() != Nalu::H264_SPS && nalu.type() != Nalu::H264_PPS)
+      continue;
+    const size_t offset = nalu.data() - elementary_stream.data();
+    const size_t size = nalu.header_size() + nalu.payload_size();
+    ASSERT_GE(size, 2u);
+    encrypted_[source_offsets[offset]] = Nalu::H264_FillerData;
+    for (size_t i = 1; i + 1 < size; ++i)
+      encrypted_[source_offsets[offset + i]] = '\xff';
+    encrypted_[source_offsets[offset + size - 1]] = '\x80';
+    ++replaced;
+  }
+  ASSERT_GT(replaced, 0u);
+  ASSERT_TRUE(ParseEncrypted(&key_source_, 17));
+  // Remove only the replacement filler before comparing the original samples.
+  for (auto& sample : samples_) {
+    BufferWriter filtered;
+    NaluReader sample_reader(Nalu::kH264, 4, sample.data(), sample.size());
+    while (sample_reader.Advance(&nalu) == NaluReader::kOk) {
+      if (nalu.type() == Nalu::H264_FillerData)
+        continue;
+      const size_t size = nalu.header_size() + nalu.payload_size();
+      filtered.AppendInt(static_cast<uint32_t>(size));
+      filtered.AppendArray(nalu.data(), size);
+    }
+    filtered.SwapBuffer(&sample);
+  }
+  ExpectOriginalSamples();
+}
+
+TEST_F(Mp2tSampleAesTest, RejectsEncryptedAvcWithoutKeySource) {
+  encrypted_.erase(0, clear_lead_size_);
+  EXPECT_FALSE(ParseEncrypted(nullptr, 17));
+  EXPECT_TRUE(samples_.empty());
+}
+
+TEST_F(Mp2tSampleAesTest, RejectsEncryptedAvcWithoutIv) {
+  encrypted_.erase(0, clear_lead_size_);
+  key_source_.key.iv.clear();
+  EXPECT_FALSE(ParseEncrypted(&key_source_, 17));
+  EXPECT_TRUE(samples_.empty());
+}
+
+TEST_F(Mp2tSampleAesTest, RejectsInvalidKeyAndIvSizes) {
+  encrypted_.erase(0, clear_lead_size_);
+  key_source_.key.iv.resize(8);
+  EXPECT_FALSE(ParseEncrypted(&key_source_, 17));
+  key_source_.key.iv.resize(16);
+  key_source_.key.key.resize(15);
+  EXPECT_FALSE(ParseEncrypted(&key_source_, 17));
+  EXPECT_TRUE(samples_.empty());
 }
 
 }  // namespace mp2t

@@ -53,11 +53,14 @@ class PackedAudioParser : public MediaParser {
   std::vector<uint8_t> buffer_;
   size_t buffer_position_ = 0;
   std::unique_ptr<AesCbcDecryptor> decryptor_;
+  std::vector<uint8_t> decryption_key_;
+  std::vector<uint8_t> recovered_iv_;
   std::unique_ptr<AudioTimestampHelper> timestamp_helper_;
   std::vector<uint8_t> audio_config_;
   bool initialized_ = false;
   bool have_segment_ = false;
   bool segment_is_encrypted_ = false;
+  bool recover_missing_iv_ = false;
   int64_t next_timestamp_ = 0;
   int64_t last_emitted_timestamp_ = kNoTimestamp;
 };

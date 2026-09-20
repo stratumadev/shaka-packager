@@ -12,6 +12,8 @@
 #include <memory>
 
 #include <packager/macros/classes.h>
+#include <packager/media/base/aes_cryptor.h>
+#include <packager/media/codecs/h264_sample_aes_iv_recovery.h>
 #include <packager/media/codecs/nalu_reader.h>
 #include <packager/media/formats/mp2t/es_parser.h>
 #include <functional>
@@ -30,13 +32,20 @@ class EsParserH26x : public EsParser {
   EsParserH26x(Nalu::CodecType type,
                std::unique_ptr<H26xByteToUnitStreamConverter> stream_converter,
                uint32_t pid,
-               const EmitSampleCB& emit_sample_cb);
+               const EmitSampleCB& emit_sample_cb,
+               std::unique_ptr<AesCryptor> sample_aes_decryptor = nullptr,
+               std::unique_ptr<H264SampleAesIvRecovery> iv_recovery = nullptr);
   ~EsParserH26x() override;
 
   // EsParser implementation overrides.
   bool Parse(const uint8_t* buf, int size, int64_t pts, int64_t dts) override;
   bool Flush() override;
   void Reset() override;
+
+  // Change protection after flushing, preserving codec configuration.
+  bool SetSampleAesDecryptor(
+      std::unique_ptr<AesCryptor> decryptor,
+      std::unique_ptr<H264SampleAesIvRecovery> iv_recovery = nullptr);
 
  protected:
   struct VideoSliceInfo {
@@ -87,6 +96,9 @@ class EsParserH26x : public EsParser {
   // Return true if successful.
   bool ParseInternal();
 
+  // Remove SAMPLE-AES escaping and decrypt a complete AVC NAL unit.
+  bool DecryptNalu(const Nalu& nalu, std::vector<uint8_t>* output);
+
   // Emit the current access unit if exists.
   bool EmitCurrentAccessUnit();
 
@@ -126,6 +138,9 @@ class EsParserH26x : public EsParser {
 
   // Filter to convert H.264/H.265 Annex B byte stream to unit stream.
   std::unique_ptr<H26xByteToUnitStreamConverter> stream_converter_;
+  std::unique_ptr<AesCryptor> sample_aes_decryptor_;
+  std::unique_ptr<H264SampleAesIvRecovery> iv_recovery_;
+  size_t iv_recovery_bytes_ = 0;
 
   // Frame for which we do not yet have a duration.
   std::shared_ptr<MediaSample> pending_sample_;
