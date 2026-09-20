@@ -5,6 +5,7 @@
 #include <packager/media/codecs/h264_sample_aes_iv_recovery.h>
 
 #include <array>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <utility>
@@ -151,8 +152,9 @@ TEST_P(H264SampleAesIvRecoveryTest,
     }
 
     ASSERT_TRUE(Process(&recovery, encrypted_slices[i]));
-    if (i == 0)
+    if (i == 0) {
       EXPECT_TRUE(recovery.iv().empty());
+    }
   }
   EXPECT_EQ(kIv, recovery.iv());
 }
