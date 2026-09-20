@@ -137,7 +137,7 @@ bool RecoverAc3Iv(std::vector<uint8_t>* frame, std::vector<uint8_t>* iv) {
   if (!bits.ReadBits(4, &begin) || !bits.ReadBits(4, &end) || begin >= end + 3)
     return false;
   size_t bands = 1;
-  for (size_t subband = begin + 1; subband < end + 3; ++subband) {
+  for (int subband = begin + 1; subband < end + 3; ++subband) {
     bool combined;
     if (!bits.ReadBits(1, &combined))
       return false;
