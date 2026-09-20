@@ -8,10 +8,40 @@
 
 #include <gtest/gtest.h>
 
+#include <packager/file.h>
 #include <packager/media/test/test_data_util.h>
 
 namespace shaka {
 namespace media {
+
+TEST(ContainerNamesTest, DetectsPackedAc3WithId3AndSegmentBoundaries) {
+  std::string input;
+  for (int segment = 1; segment <= 3; ++segment) {
+    std::string part;
+    ASSERT_TRUE(File::ReadFileToString(
+        GetAppTestDataFilePath(
+            "avc-ts-ac3-packed-audio-with-encryption/"
+            "bear-640x360-ac3-audio-" + std::to_string(segment) + ".ac3")
+            .string().c_str(),
+        &part));
+    EXPECT_EQ(CONTAINER_AC3,
+              DetermineContainer(reinterpret_cast<const uint8_t*>(part.data()),
+                                 static_cast<int>(part.size())));
+    input += part;
+  }
+  EXPECT_EQ(CONTAINER_AC3,
+            DetermineContainer(reinterpret_cast<const uint8_t*>(input.data()),
+                               static_cast<int>(input.size())));
+}
+
+TEST(ContainerNamesTest, DoesNotIdentifyMalformedId3AsPackedAc3) {
+  const uint8_t invalid_size[] = {'I', 'D', '3', 4, 0, 0, 0, 0, 0, 0x80};
+  EXPECT_EQ(CONTAINER_UNKNOWN,
+            DetermineContainer(invalid_size, sizeof(invalid_size)));
+  const uint8_t truncated_tag[] = {'I', 'D', '3', 4, 0, 0, 0, 0, 1, 0};
+  EXPECT_EQ(CONTAINER_UNKNOWN,
+            DetermineContainer(truncated_tag, sizeof(truncated_tag)));
+}
 
 // Using a macros to simplify tests. Since EXPECT_EQ outputs the second argument
 // as a string when it fails, this lets the output identify what item actually

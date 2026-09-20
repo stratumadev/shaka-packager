@@ -200,6 +200,7 @@ jobs:
 
           cmake \
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DCMAKE_GENERATOR_PLATFORM="${{ matrix.generator_platform }}" \
             -DCMAKE_BUILD_TYPE="${{ matrix.build_type }}" \
             -DBUILD_SHARED_LIBS="$BUILD_SHARED_LIBS" \
             -DFULLY_STATIC="$FULLY_STATIC" \
@@ -271,11 +272,15 @@ jobs:
           fi
           echo "::endgroup::"
 
-          echo "::group::Strip executables"
-          strip packager${{ matrix.exe_ext }}
-          strip mpd_generator${{ matrix.exe_ext }}
-          strip shaka_decrypt${{ matrix.exe_ext }}
-          echo "::endgroup::"
+          # MSVC keeps debug symbols in PDB files; GNU strip is not needed and
+          # may not support Windows ARM64 executables.
+          if [[ "${{ runner.os }}" != "Windows" ]]; then
+            echo "::group::Strip executables"
+            strip packager${{ matrix.exe_ext }}
+            strip mpd_generator${{ matrix.exe_ext }}
+            strip shaka_decrypt${{ matrix.exe_ext }}
+            echo "::endgroup::"
+          fi
 
           SUFFIX="-${{ matrix.os_name }}-${{ matrix.target_arch }}"
           EXE_SUFFIX="$SUFFIX${{ matrix.exe_ext}}"

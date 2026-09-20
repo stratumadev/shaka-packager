@@ -1601,10 +1601,35 @@ static MediaContainerName LookupContainerByFirst4(const uint8_t* buffer,
     case TAG('F','W','S',0):
       return CONTAINER_SWF;
 
-    case TAG('I','D','3',0):
+    case TAG('I','D','3',0): {
+      // HLS packed audio starts with ID3 metadata, not an MP4 initialization
+      // segment. Skip whole tags: the zac3 setup PRIV frame itself contains an
+      // AC-3 header, so searching for a syncword inside the tag is ambiguous.
+      int offset = 0;
+      while (buffer_size - offset >= 10 &&
+             StartsWith(buffer + offset, buffer_size - offset, "ID3")) {
+        const uint8_t* tag = buffer + offset;
+        if (tag[3] != 4 ||
+            ((tag[6] | tag[7] | tag[8] | tag[9]) & 0x80)) {
+          break;
+        }
+        const int tag_size = (tag[6] << 21) | (tag[7] << 14) |
+                             (tag[8] << 7) | tag[9];
+        const int total_size = 10 + tag_size + ((tag[5] & 0x10) ? 10 : 0);
+        if (total_size > buffer_size - offset)
+          break;
+        offset += total_size;
+      }
+      // Only inspect the first frame header here. Concatenated HLS segments
+      // include further ID3 tags, which the ordinary raw-AC3 probe rejects.
+      if (offset > 0 && buffer_size - offset >= 7 &&
+          CheckAc3(buffer + offset, 7)) {
+        return CONTAINER_AC3;
+      }
       if (CheckMp3(buffer, buffer_size, true))
         return CONTAINER_MP3;
       break;
+    }
   }
 
   // Maybe the first 2 characters are something we can use.

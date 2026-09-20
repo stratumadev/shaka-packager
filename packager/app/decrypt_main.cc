@@ -64,7 +64,8 @@ void PrintUsage(const char* program) {
   std::cerr
       << "Usage: " << program
       << " input=<file>,stream=<audio|video|n>,output=<file> "
-         "--enable_raw_key_decryption --keys key_id=<kid>:key=<key>\n";
+         "--enable_raw_key_decryption --keys key_id=<kid>:key=<key>[:iv=<iv>]\n"
+      << "Encrypted HLS packed AC-3 requires the playlist IV and one key.\n";
 }
 
 std::optional<DecryptStreamDescriptor> ParseStreamDescriptor(
@@ -220,8 +221,16 @@ Status Decrypt(const CommandLine& command_line) {
       std::make_shared<media::Demuxer>(command_line.stream.input);
   demuxer->set_input_format(command_line.stream.input_format);
 
+  // Packed audio has no in-band KID. A single supplied key is unambiguous;
+  // expose it under the default label while preserving lookup by its key ID.
+  RawKeyParams raw_key = command_line.raw_key;
+  if (raw_key.key_map.size() == 1) {
+    auto key_info = raw_key.key_map.begin()->second;
+    raw_key.key_map.clear();
+    raw_key.key_map.emplace("", std::move(key_info));
+  }
   std::unique_ptr<media::RawKeySource> key_source =
-      media::RawKeySource::Create(command_line.raw_key);
+      media::RawKeySource::Create(raw_key);
   if (!key_source) {
     return Status(error::INVALID_ARGUMENT, "Invalid raw key parameters.");
   }

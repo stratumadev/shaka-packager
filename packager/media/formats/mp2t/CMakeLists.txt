@@ -4,9 +4,16 @@
 # license that can be found in the LICENSE file or at
 # https://developers.google.com/open-source/licenses/bsd
 
-add_library(mp2t STATIC
+add_library(ac3_header STATIC
   ac3_header.cc
   ac3_header.h
+  audio_header.h
+  )
+target_link_libraries(ac3_header
+  media_base
+  )
+
+add_library(mp2t STATIC
   adts_header.cc
   adts_header.h
   audio_header.h
@@ -59,6 +66,7 @@ add_library(mp2t STATIC
   )
 
 target_link_libraries(mp2t
+  ac3_header
   absl::log
   dvb
   media_base

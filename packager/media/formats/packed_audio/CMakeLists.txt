@@ -5,6 +5,9 @@
 # https://developers.google.com/open-source/licenses/bsd
 
 add_library(packed_audio STATIC
+  packed_audio_constants.h
+  packed_audio_parser.cc
+  packed_audio_parser.h
   packed_audio_segmenter.cc
   packed_audio_segmenter.h
   packed_audio_writer.cc
@@ -12,11 +15,14 @@ add_library(packed_audio STATIC
   )
 
 target_link_libraries(packed_audio
+  ac3_header
+  media_base
   media_event
   media_codecs
 )
 
 add_executable(packed_audio_unittest
+  packed_audio_parser_unittest.cc
   packed_audio_segmenter_unittest.cc
   packed_audio_writer_unittest.cc
   )
@@ -28,6 +34,7 @@ target_link_libraries(packed_audio_unittest
   test_data_util
   absl::flags
   media_event
+  mp4
   packed_audio
   gmock
   gtest

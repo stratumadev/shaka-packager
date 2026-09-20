@@ -27,7 +27,16 @@
       "os_name": "win",
       "target_arch": "x64",
       "exe_ext": ".exe",
-      "generator": ""
+      "generator": "",
+      "generator_platform": "x64"
+    },
+    {
+      "os": "windows-11-vs2026-arm",
+      "os_name": "win",
+      "target_arch": "arm64",
+      "exe_ext": ".exe",
+      "generator": "Visual Studio 18 2026",
+      "generator_platform": "ARM64"
     },
     {
       "os": "ubuntu-24.04-arm",

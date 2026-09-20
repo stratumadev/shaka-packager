@@ -26,6 +26,7 @@
 #include <packager/media/formats/mp2t/mp2t_media_parser.h>
 #endif
 #include <packager/media/formats/mp4/mp4_media_parser.h>
+#include <packager/media/formats/packed_audio/packed_audio_parser.h>
 #if !defined(SHAKA_DECRYPT)
 #include <packager/media/formats/webm/webm_media_parser.h>
 #include <packager/media/formats/webvtt/webvtt_parser.h>
@@ -193,6 +194,9 @@ Status Demuxer::InitializeParser() {
   switch (container_name_) {
     case CONTAINER_MOV:
       parser_.reset(new mp4::MP4MediaParser());
+      break;
+    case CONTAINER_AC3:
+      parser_.reset(new PackedAudioParser());
       break;
 #if !defined(SHAKA_DECRYPT)
     case CONTAINER_MPEG2TS:

@@ -190,7 +190,7 @@ target_compile_definitions(shaka_decrypt
 target_link_libraries(shaka_decrypt
   absl::log
   absl::strings
-  demuxer_mp4_only
+  demuxer_decrypt
   file
   kv_pairs
   media_base

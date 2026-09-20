@@ -11,19 +11,21 @@ target_link_libraries(demuxer
   media_base
   mp2t
   mp4
+  packed_audio
   webvtt
   wvm
   formats_webm
   media_origin)
 
-add_library(demuxer_mp4_only STATIC
+add_library(demuxer_decrypt STATIC
   demuxer.cc
   demuxer.h)
-target_compile_definitions(demuxer_mp4_only
+target_compile_definitions(demuxer_decrypt
   PRIVATE SHAKA_DECRYPT=1)
-target_link_libraries(demuxer_mp4_only
+target_link_libraries(demuxer_decrypt
   media_base
   mp4
+  packed_audio
   media_origin)
 
 add_executable(demuxer_unittest

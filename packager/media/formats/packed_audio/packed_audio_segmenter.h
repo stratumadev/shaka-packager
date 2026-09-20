@@ -12,6 +12,7 @@
 
 #include <packager/media/base/buffer_writer.h>
 #include <packager/media/base/stream_info.h>
+#include <packager/media/formats/packed_audio/packed_audio_constants.h>
 #include <packager/status.h>
 
 namespace shaka {
@@ -20,19 +21,6 @@ namespace media {
 class AACAudioSpecificConfig;
 class Id3Tag;
 class MediaSample;
-
-/// PackedAudio uses transport stream timescale.
-constexpr double kPackedAudioTimescale = 90000;
-
-/// https://tools.ietf.org/html/draft-pantos-http-live-streaming-23#section-3.4
-/// Timestamp is carried inside an ID3 PRIV tag with identifier:
-constexpr char kTimestampOwnerIdentifier[] =
-    "com.apple.streaming.transportStreamTimestamp";
-
-/// http://goo.gl/FPhLma 2.4.3.4 Elementary Stream Setup for FairPlay streaming
-/// Audio setup information is carried inside an ID3 PRIV tag with identifier:
-constexpr char kAudioDescriptionOwnerIdentifier[] =
-    "com.apple.streaming.audioDescription";
 
 /// Implements packed audio segment writer.
 /// https://tools.ietf.org/html/draft-pantos-http-live-streaming-23#section-3.4
