@@ -25,7 +25,7 @@ namespace mp2t {
 class Ac3Header;
 }
 
-// Incrementally parses HLS Packed Audio segments containing AC-3.  Encrypted
+// Incrementally parses HLS Packed Audio containing AC-3/E-AC-3/AAC. Encrypted
 // segments carry their Apple SAMPLE-AES setup in the ID3 audioDescription PRIV
 // frame; clear segments contain only the transport-stream timestamp frame.
 class PackedAudioParser : public MediaParser {
@@ -44,6 +44,9 @@ class PackedAudioParser : public MediaParser {
   bool ParseAvailable();
   bool ParseId3Tag();
   bool ParseAc3Frame();
+  bool ParseAacFrame();
+  bool ParseEc3Frame();
+  bool EmitEc3Sample();
   bool EmitStreamInfo(const mp2t::Ac3Header& header);
   bool DecryptAc3Frame(std::vector<uint8_t>* frame);
 
@@ -57,6 +60,15 @@ class PackedAudioParser : public MediaParser {
   std::vector<uint8_t> recovered_iv_;
   std::unique_ptr<AudioTimestampHelper> timestamp_helper_;
   std::vector<uint8_t> audio_config_;
+  std::vector<uint8_t> aac_adts_config_;
+  std::vector<uint8_t> ec3_frame_;
+  size_t audio_setup_position_ = 0;
+  uint32_t audio_type_ = 0;
+  uint32_t ec3_sampling_frequency_ = 0;
+  uint8_t ec3_blocks_ = 0;
+  uint8_t ec3_frame_blocks_ = 0;
+  uint8_t ec3_dependents_ = 0;
+  uint8_t ec3_expected_dependents_ = 0;
   bool initialized_ = false;
   bool have_segment_ = false;
   bool segment_is_encrypted_ = false;

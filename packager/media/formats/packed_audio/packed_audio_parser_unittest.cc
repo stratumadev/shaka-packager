@@ -6,6 +6,7 @@
 
 #include <packager/media/formats/packed_audio/packed_audio_parser.h>
 
+#include <algorithm>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -16,11 +17,13 @@
 
 #include <packager/file.h>
 #include <packager/media/base/aes_encryptor.h>
+#include <packager/media/base/audio_stream_info.h>
 #include <packager/media/base/buffer_writer.h>
 #include <packager/media/base/id3_tag.h>
 #include <packager/media/base/media_sample.h>
 #include <packager/media/base/raw_key_source.h>
 #include <packager/media/base/stream_info.h>
+#include <packager/media/codecs/aac_audio_specific_config.h>
 #include <packager/media/formats/mp4/mp4_media_parser.h>
 #include <packager/media/formats/packed_audio/packed_audio_constants.h>
 #include <packager/media/test/test_data_util.h>
@@ -35,6 +38,8 @@ namespace shaka {
 namespace media {
 namespace {
 
+uint16_t Ac3Crc(const uint8_t* data, size_t size);
+
 std::vector<uint8_t> MakeAc3Frame(uint8_t sample_rate_code = 0) {
   // A 48-kHz, 32-kbit/s, stereo AC-3 frame. frmsizecod=0 makes it 128 bytes.
   std::vector<uint8_t> frame(sample_rate_code == 1 ? 138 : 128, 0);
@@ -43,6 +48,33 @@ std::vector<uint8_t> MakeAc3Frame(uint8_t sample_rate_code = 0) {
   frame[4] = sample_rate_code << 6;
   frame[5] = 0x40;  // bsid = 8.
   frame[6] = 0x40;  // acmod = 2 (stereo).
+  return frame;
+}
+
+std::vector<uint8_t> MakeEc3Frame(uint8_t blocks_code = 3,
+                                  uint8_t stream_type = 0,
+                                  uint8_t sample_rate_code = 0,
+                                  size_t frame_size = 98) {
+  std::vector<uint8_t> frame(frame_size, 0);
+  frame[0] = 0x0b;
+  frame[1] = 0x77;
+  const size_t frame_size_code = frame_size / 2 - 1;
+  frame[2] = static_cast<uint8_t>((stream_type << 6) | (frame_size_code >> 8));
+  frame[3] = static_cast<uint8_t>(frame_size_code);
+  frame[4] = static_cast<uint8_t>((sample_rate_code << 6) | (blocks_code << 4) |
+                                  (stream_type == 1 ? 4 : 15));
+  frame[5] = 16 << 3;
+  if (stream_type == 1) {
+    frame[6] = 0x10;
+    frame[7] = 0x20;
+  }
+
+  for (size_t i = 16; i < frame.size(); ++i)
+    frame[i] = static_cast<uint8_t>(7 + i * 13 + stream_type);
+
+  const uint16_t crc = Ac3Crc(frame.data() + 2, frame.size() - 4);
+  frame[frame.size() - 2] = static_cast<uint8_t>(crc >> 8);
+  frame.back() = static_cast<uint8_t>(crc);
   return frame;
 }
 
@@ -107,6 +139,138 @@ class MockKeySource : public RawKeySource {
  public:
   MOCK_METHOD2(GetKey,
                Status(const std::string& stream_label, EncryptionKey* key));
+};
+
+class PackedEc3ParserTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    key_.key.assign(16, 0x31);
+    key_.iv.assign(16, 0x42);
+    EXPECT_CALL(key_source_, GetKey(std::string(), _))
+        .WillRepeatedly(Invoke([this](const std::string&, EncryptionKey* key) {
+          *key = key_;
+          return Status::OK;
+        }));
+    parser_.Init(
+        [this](const std::vector<std::shared_ptr<StreamInfo>>& streams) {
+          streams_ = streams;
+        },
+        [this](uint32_t, std::shared_ptr<MediaSample> sample) {
+          samples_.push_back(std::move(sample));
+          return true;
+        },
+        MediaParser::NewTextSampleCB(), &key_source_);
+  }
+
+  std::vector<uint8_t> Segment(const std::vector<std::vector<uint8_t>>& frames,
+                               int64_t timestamp = 90000) {
+    std::string description("zec3\0\0\1", 7);
+    description.push_back(static_cast<char>(config_.size()));
+    description.append(reinterpret_cast<const char*>(config_.data()),
+                       config_.size());
+
+    auto segment = MakePackedAc3Segment(description, timestamp);
+    segment.resize(segment.size() - MakeAc3Frame().size());
+
+    AesCbcEncryptor encryptor(kNoPadding, AesCryptor::kDontUseConstantIv);
+    EXPECT_TRUE(encryptor.InitializeWithIv(key_.key, encryption_iv_));
+    for (auto frame : frames) {
+      EXPECT_TRUE(encryptor.Crypt(frame.data() + 16,
+                                  ((frame.size() - 16) / 16) * 16,
+                                  frame.data() + 16));
+      segment.insert(segment.end(), frame.begin(), frame.end());
+    }
+    return segment;
+  }
+
+  PackedAudioParser parser_;
+  MockKeySource key_source_;
+  EncryptionKey key_;
+  std::vector<uint8_t> encryption_iv_ = std::vector<uint8_t>(16, 0x42);
+  std::vector<uint8_t> config_ = {0, 0, 0x20, 0x0f, 0};
+  std::vector<std::shared_ptr<StreamInfo>> streams_;
+  std::vector<std::shared_ptr<MediaSample>> samples_;
+};
+
+class PackedAacParserTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    key_.key.assign(16, 0x31);
+    key_.iv.assign(16, 0x42);
+    EXPECT_CALL(key_source_, GetKey(std::string(), _))
+        .WillRepeatedly(Invoke([this](const std::string&, EncryptionKey* key) {
+          *key = key_;
+          return Status::OK;
+        }));
+    parser_.Init(
+        [this](const std::vector<std::shared_ptr<StreamInfo>>& streams) {
+          streams_ = streams;
+        },
+        [this](uint32_t, std::shared_ptr<MediaSample> sample) {
+          samples_.push_back(std::move(sample));
+          return true;
+        },
+        MediaParser::NewTextSampleCB(), &key_source_);
+
+    payload_.resize(67);
+    for (size_t i = 0; i < payload_.size(); ++i)
+      payload_[i] = static_cast<uint8_t>(7 + i * 13);
+  }
+
+  std::vector<uint8_t> Frame(const std::vector<uint8_t>& payload,
+                             bool with_crc = false) {
+    AACAudioSpecificConfig config;
+    EXPECT_TRUE(config.Parse(config_));
+    std::vector<uint8_t> frame;
+    EXPECT_TRUE(config.ConvertToADTS(payload.data(), payload.size(), &frame));
+
+    if (with_crc) {
+      frame[1] &= 0xfe;
+      frame.insert(frame.begin() + 7, {0x12, 0x34});
+      frame[3] = static_cast<uint8_t>((frame[3] & 0xfc) | (frame.size() >> 11));
+      frame[4] = static_cast<uint8_t>(frame.size() >> 3);
+      frame[5] = static_cast<uint8_t>(((frame.size() & 7) << 5) | 0x1f);
+    }
+    return frame;
+  }
+
+  std::vector<uint8_t> Segment(const std::vector<std::vector<uint8_t>>& frames,
+                               int64_t timestamp = 90000,
+                               bool encrypted = true) {
+    if (!encrypted)
+      return MakeClearPackedAc3SegmentWithFrames(timestamp, frames);
+
+    std::string description(type_, 4);
+    description.append("\0\0\1", 3);
+    description.push_back(static_cast<char>(config_.size()));
+    description.append(reinterpret_cast<const char*>(config_.data()),
+                       config_.size());
+    auto segment = MakePackedAc3Segment(description, timestamp);
+    segment.resize(segment.size() - MakeAc3Frame().size());
+
+    AesCbcEncryptor encryptor(kNoPadding, AesCryptor::kUseConstantIv);
+    EXPECT_TRUE(encryptor.InitializeWithIv(key_.key, encryption_iv_));
+    for (auto frame : frames) {
+      const size_t clear_size = (frame[1] & 1 ? 7 : 9) + 16;
+      if (frame.size() >= clear_size + 16) {
+        EXPECT_TRUE(encryptor.Crypt(frame.data() + clear_size,
+                                   ((frame.size() - clear_size) / 16) * 16,
+                                   frame.data() + clear_size));
+      }
+      segment.insert(segment.end(), frame.begin(), frame.end());
+    }
+    return segment;
+  }
+
+  PackedAudioParser parser_;
+  MockKeySource key_source_;
+  EncryptionKey key_;
+  std::vector<uint8_t> encryption_iv_ = std::vector<uint8_t>(16, 0x42);
+  std::vector<uint8_t> config_ = {0x12, 0x10};
+  const char* type_ = "zaac";
+  std::vector<uint8_t> payload_;
+  std::vector<std::shared_ptr<StreamInfo>> streams_;
+  std::vector<std::shared_ptr<MediaSample>> samples_;
 };
 
 uint16_t Ac3Crc(const uint8_t* data, size_t size) {
@@ -517,15 +681,828 @@ TEST(PackedAudioParserTest, RejectsEncryptedAc3WithoutIvOrRecoverablePattern) {
   EXPECT_FALSE(parser.Parse(segment.data(), static_cast<int>(segment.size())));
 }
 
-TEST(PackedAudioParserTest, RejectsUnsupportedEac3AudioDescription) {
-  const std::vector<uint8_t> segment =
-      MakePackedAc3Segment(MakeAudioDescription("zec3"));
+TEST_F(PackedAacParserTest, DecryptsAacAcrossOneByteChunksAndResetsIvPerFrame) {
+  const auto frame = Frame(payload_);
+  const auto segment = Segment({frame, frame});
+  ASSERT_TRUE(std::equal(segment.end() - frame.size(), segment.end(),
+                         segment.end() - 2 * frame.size()));
 
+  for (const uint8_t byte : segment)
+    ASSERT_TRUE(parser_.Parse(&byte, 1));
+  ASSERT_TRUE(parser_.Flush());
+  ASSERT_EQ(2u, samples_.size());
+  for (size_t i = 0; i < samples_.size(); ++i) {
+    EXPECT_EQ(payload_, std::vector<uint8_t>(samples_[i]->data(),
+                                            samples_[i]->data() +
+                                                samples_[i]->data_size()));
+    EXPECT_EQ(90000 + static_cast<int64_t>(i) * 1024 * 90000 / 44100,
+              samples_[i]->pts());
+    EXPECT_EQ(samples_[i]->pts(), samples_[i]->dts());
+    EXPECT_FALSE(samples_[i]->is_encrypted());
+  }
+  EXPECT_EQ(2089, samples_[0]->duration());
+  EXPECT_EQ(2090, samples_[1]->duration());
+  ASSERT_EQ(1u, streams_.size());
+  EXPECT_EQ(kCodecAAC, streams_[0]->codec());
+  EXPECT_EQ("mp4a.40.2", streams_[0]->codec_string());
+  EXPECT_EQ(config_, streams_[0]->codec_config());
+  const auto* audio = static_cast<AudioStreamInfo*>(streams_[0].get());
+  EXPECT_EQ(44100u, audio->sampling_frequency());
+  EXPECT_EQ(2u, audio->num_channels());
+}
+
+TEST_F(PackedAacParserTest, HandlesClearPrefixCompleteBlocksAndResidualBytes) {
+  std::vector<std::vector<uint8_t>> frames;
+  std::vector<std::vector<uint8_t>> payloads;
+  for (const size_t size : {1u, 15u, 16u, 17u, 31u, 32u, 33u, 47u, 48u, 49u,
+                           67u}) {
+    std::vector<uint8_t> payload(size);
+    for (size_t i = 0; i < size; ++i)
+      payload[i] = static_cast<uint8_t>(11 + i * 17);
+    frames.push_back(Frame(payload));
+    payloads.push_back(std::move(payload));
+  }
+  const auto segment = Segment(frames);
+  size_t offset = segment.size();
+  for (const auto& frame : frames)
+    offset -= frame.size();
+  for (const auto& frame : frames) {
+    const size_t clear_size = std::min<size_t>(23, frame.size());
+    EXPECT_TRUE(std::equal(frame.begin(), frame.begin() + clear_size,
+                          segment.begin() + offset));
+    const size_t cipher_size = ((frame.size() - clear_size) / 16) * 16;
+    EXPECT_TRUE(std::equal(frame.begin() + clear_size + cipher_size, frame.end(),
+                          segment.begin() + offset + clear_size + cipher_size));
+    if (cipher_size) {
+      EXPECT_FALSE(std::equal(frame.begin() + clear_size,
+                             frame.begin() + clear_size + cipher_size,
+                             segment.begin() + offset + clear_size));
+    }
+    offset += frame.size();
+  }
+
+  ASSERT_TRUE(parser_.Parse(segment.data(), static_cast<int>(segment.size())));
+  ASSERT_TRUE(parser_.Flush());
+  ASSERT_EQ(payloads.size(), samples_.size());
+  for (size_t i = 0; i < payloads.size(); ++i)
+    EXPECT_EQ(payloads[i],
+              std::vector<uint8_t>(samples_[i]->data(),
+                                   samples_[i]->data() + samples_[i]->data_size()));
+}
+
+TEST_F(PackedAacParserTest, StripsCrcProtectedAdtsHeadersBeforeEmittingSamples) {
+  const auto frame = Frame(payload_, true);
+  const auto segment = Segment({frame, frame});
+
+  for (size_t i = 0; i < segment.size(); i += 8)
+    ASSERT_TRUE(parser_.Parse(
+        segment.data() + i,
+        static_cast<int>(std::min<size_t>(8, segment.size() - i))));
+  ASSERT_TRUE(parser_.Flush());
+  ASSERT_EQ(2u, samples_.size());
+  for (const auto& sample : samples_)
+    EXPECT_EQ(payload_, std::vector<uint8_t>(sample->data(),
+                                            sample->data() + sample->data_size()));
+}
+
+TEST_F(PackedAacParserTest, PreservesMultipleClearLeadTagsAcrossChunks) {
+  const auto frame = Frame(payload_);
+  const auto first = Segment({frame}, 90000, false);
+  auto second = Segment({frame}, 93000, false);
+  const auto encrypted = Segment({frame}, 96000);
+  second.insert(second.end(), encrypted.begin(), encrypted.end());
+
+  for (const uint8_t byte : first)
+    ASSERT_TRUE(parser_.Parse(&byte, 1));
+  EXPECT_TRUE(samples_.empty());
+  for (size_t i = 0; i < second.size(); i += 11)
+    ASSERT_TRUE(parser_.Parse(
+        second.data() + i,
+        static_cast<int>(std::min<size_t>(11, second.size() - i))));
+  ASSERT_TRUE(parser_.Flush());
+  ASSERT_EQ(3u, samples_.size());
+  for (size_t i = 0; i < samples_.size(); ++i) {
+    EXPECT_EQ(payload_, std::vector<uint8_t>(samples_[i]->data(),
+                                            samples_[i]->data() +
+                                                samples_[i]->data_size()));
+    EXPECT_EQ(90000 + static_cast<int64_t>(i) * 3000, samples_[i]->pts());
+  }
+}
+
+TEST_F(PackedAacParserTest, PreservesFullHeAacConfigAndCoreSampleDurations) {
+  config_ = {0x13, 0x10, 0x56, 0xe5, 0x98};
+  type_ = "zach";
+  const auto frame = Frame(payload_);
+  auto segment = Segment({frame}, 90000, false);
+  const auto encrypted = Segment({frame, frame}, 93840);
+  segment.insert(segment.end(), encrypted.begin(), encrypted.end());
+
+  for (const uint8_t byte : segment)
+    ASSERT_TRUE(parser_.Parse(&byte, 1));
+  ASSERT_TRUE(parser_.Flush());
+  ASSERT_EQ(1u, streams_.size());
+  EXPECT_EQ(config_, streams_[0]->codec_config());
+  EXPECT_EQ("mp4a.40.5", streams_[0]->codec_string());
+  const auto* audio = static_cast<AudioStreamInfo*>(streams_[0].get());
+  EXPECT_EQ(48000u, audio->sampling_frequency());
+  EXPECT_EQ(2u, audio->num_channels());
+  ASSERT_EQ(3u, samples_.size());
+  for (size_t i = 0; i < samples_.size(); ++i) {
+    EXPECT_EQ(payload_, std::vector<uint8_t>(samples_[i]->data(),
+                                            samples_[i]->data() +
+                                                samples_[i]->data_size()));
+    EXPECT_EQ(90000 + static_cast<int64_t>(i) * 3840, samples_[i]->pts());
+    EXPECT_EQ(3840, samples_[i]->duration());
+  }
+}
+
+TEST_F(PackedAacParserTest, PreservesFullParametricStereoConfig) {
+  config_ = {0x13, 0x08, 0x56, 0xe5, 0x9d, 0x48, 0x80};
+  type_ = "zacp";
+  const auto frame = Frame(payload_);
+  const auto segment = Segment({frame});
+
+  ASSERT_TRUE(parser_.Parse(segment.data(), static_cast<int>(segment.size())));
+  ASSERT_TRUE(parser_.Flush());
+  ASSERT_EQ(1u, streams_.size());
+  EXPECT_EQ(config_, streams_[0]->codec_config());
+  EXPECT_EQ("mp4a.40.29", streams_[0]->codec_string());
+  const auto* audio = static_cast<AudioStreamInfo*>(streams_[0].get());
+  EXPECT_EQ(48000u, audio->sampling_frequency());
+  EXPECT_EQ(2u, audio->num_channels());
+  ASSERT_EQ(1u, samples_.size());
+  EXPECT_EQ(3840, samples_[0]->duration());
+  EXPECT_EQ(payload_, std::vector<uint8_t>(samples_[0]->data(),
+                                          samples_[0]->data() +
+                                              samples_[0]->data_size()));
+}
+
+TEST_F(PackedAacParserTest, PreservesImplicitHeAacConfig) {
+  config_ = {0x13, 0x10};
+  type_ = "zach";
+  const auto segment = Segment({Frame(payload_)});
+
+  ASSERT_TRUE(parser_.Parse(segment.data(), static_cast<int>(segment.size())));
+  ASSERT_TRUE(parser_.Flush());
+  ASSERT_EQ(1u, streams_.size());
+  EXPECT_EQ(config_, streams_[0]->codec_config());
+  EXPECT_EQ("mp4a.40.5", streams_[0]->codec_string());
+  const auto* audio = static_cast<AudioStreamInfo*>(streams_[0].get());
+  EXPECT_EQ(48000u, audio->sampling_frequency());
+  EXPECT_EQ(2u, audio->num_channels());
+  ASSERT_EQ(1u, samples_.size());
+  EXPECT_EQ(3840, samples_[0]->duration());
+  EXPECT_EQ(payload_, std::vector<uint8_t>(samples_[0]->data(),
+                                          samples_[0]->data() +
+                                              samples_[0]->data_size()));
+}
+
+TEST_F(PackedAacParserTest, PreservesImplicitParametricStereoConfig) {
+  config_ = {0x13, 0x08};
+  type_ = "zacp";
+  const auto segment = Segment({Frame(payload_)});
+
+  ASSERT_TRUE(parser_.Parse(segment.data(), static_cast<int>(segment.size())));
+  ASSERT_TRUE(parser_.Flush());
+  ASSERT_EQ(1u, streams_.size());
+  EXPECT_EQ(config_, streams_[0]->codec_config());
+  EXPECT_EQ("mp4a.40.29", streams_[0]->codec_string());
+  const auto* audio = static_cast<AudioStreamInfo*>(streams_[0].get());
+  EXPECT_EQ(48000u, audio->sampling_frequency());
+  EXPECT_EQ(2u, audio->num_channels());
+  ASSERT_EQ(1u, samples_.size());
+  EXPECT_EQ(3840, samples_[0]->duration());
+  EXPECT_EQ(payload_, std::vector<uint8_t>(samples_[0]->data(),
+                                          samples_[0]->data() +
+                                              samples_[0]->data_size()));
+}
+
+TEST_F(PackedAacParserTest, InfersClearAacConfigWithoutAKeySource) {
+  const auto segment = Segment({Frame(payload_)}, 90000, false);
   PackedAudioParser parser;
-  parser.Init(MediaParser::InitCB(), MediaParser::NewMediaSampleCB(),
-              MediaParser::NewTextSampleCB(), nullptr);
+  parser.Init(
+      [this](const std::vector<std::shared_ptr<StreamInfo>>& streams) {
+        streams_ = streams;
+      },
+      [this](uint32_t, std::shared_ptr<MediaSample> sample) {
+        samples_.push_back(std::move(sample));
+        return true;
+      },
+      MediaParser::NewTextSampleCB(), nullptr);
+
+  ASSERT_TRUE(parser.Parse(segment.data(), static_cast<int>(segment.size())));
+  ASSERT_TRUE(parser.Flush());
+  ASSERT_EQ(1u, streams_.size());
+  EXPECT_EQ(config_, streams_[0]->codec_config());
+  ASSERT_EQ(1u, samples_.size());
+  EXPECT_EQ(payload_, std::vector<uint8_t>(samples_[0]->data(),
+                                          samples_[0]->data() +
+                                              samples_[0]->data_size()));
+}
+
+TEST_F(PackedAacParserTest, KeepsSetupAcrossEncryptedToClearTransition) {
+  const auto frame = Frame(payload_);
+  auto segment = Segment({frame});
+  const auto clear = Segment({frame}, 93000, false);
+  segment.insert(segment.end(), clear.begin(), clear.end());
+
+  ASSERT_TRUE(parser_.Parse(segment.data(), static_cast<int>(segment.size())));
+  ASSERT_TRUE(parser_.Flush());
+  ASSERT_EQ(2u, samples_.size());
+  EXPECT_EQ(93000, samples_[1]->pts());
+  EXPECT_EQ(payload_, std::vector<uint8_t>(samples_[1]->data(),
+                                          samples_[1]->data() +
+                                              samples_[1]->data_size()));
+}
+
+TEST_F(PackedAacParserTest, RejectsEncryptedAacWithoutExplicitIv) {
+  const auto segment = Segment({Frame(payload_)});
+  key_.iv.clear();
+
+  EXPECT_FALSE(parser_.Parse(segment.data(), static_cast<int>(segment.size())));
+  EXPECT_TRUE(samples_.empty());
+}
+
+TEST_F(PackedAacParserTest, RejectsEncryptedAacWithAnEightByteIv) {
+  const auto segment = Segment({Frame(payload_)});
+  key_.iv.resize(8);
+
+  EXPECT_FALSE(parser_.Parse(segment.data(), static_cast<int>(segment.size())));
+  EXPECT_TRUE(samples_.empty());
+}
+
+TEST_F(PackedAacParserTest, RejectsChangedAudioSpecificConfig) {
+  const auto first = Segment({Frame(payload_)});
+  ASSERT_TRUE(parser_.Parse(first.data(), static_cast<int>(first.size())));
+  config_ = {0x11, 0x90};
+  const auto second = Segment({Frame(payload_)}, 93000);
+
+  EXPECT_FALSE(parser_.Parse(second.data(), static_cast<int>(second.size())));
+  EXPECT_EQ(1u, samples_.size());
+}
+
+TEST_F(PackedAacParserTest, RejectsInvalidAudioSpecificConfig) {
+  const auto frame = Frame(payload_);
+  config_ = {0, 0x08};
+  const auto segment = Segment({frame});
+
+  EXPECT_FALSE(parser_.Parse(segment.data(), static_cast<int>(segment.size())));
+  EXPECT_TRUE(samples_.empty());
+}
+
+TEST_F(PackedAacParserTest, Rejects960SampleFrames) {
+  const auto frame = Frame(payload_);
+  config_[1] |= 4;
+  const auto segment = Segment({frame});
+
+  EXPECT_FALSE(parser_.Parse(segment.data(), static_cast<int>(segment.size())));
+  EXPECT_TRUE(samples_.empty());
+}
+
+TEST_F(PackedAacParserTest, RejectsAdtsHeaderThatDisagreesWithSetup) {
+  auto frame = Frame(payload_);
+  frame[2] = static_cast<uint8_t>((frame[2] & 0xc3) | (3 << 2));
+  const auto segment = Segment({frame});
+
+  EXPECT_FALSE(parser_.Parse(segment.data(), static_cast<int>(segment.size())));
+  EXPECT_TRUE(samples_.empty());
+}
+
+TEST_F(PackedAacParserTest, RejectsInvalidAdtsAndMultipleRawDataBlocks) {
+  const auto frame = Frame(payload_);
+  std::vector<std::vector<uint8_t>> invalid(6, frame);
+  invalid[0][0] = 0xfe;
+  invalid[1][1] |= 2;
+  invalid[2][2] |= 0x3c;
+  invalid[3][6] |= 1;
+  invalid[4][3] &= 0xfc;
+  invalid[4][4] = 0;
+  invalid[4][5] &= 0x1f;
+  invalid[5][2] &= 0xfe;
+  invalid[5][3] &= 0x3f;
+
+  for (const auto& bad_frame : invalid) {
+    PackedAudioParser parser;
+    size_t emitted = 0;
+    parser.Init(
+        MediaParser::InitCB(),
+        [&emitted](uint32_t, std::shared_ptr<MediaSample>) {
+          ++emitted;
+          return true;
+        },
+        MediaParser::NewTextSampleCB(), &key_source_);
+    const auto segment = Segment({bad_frame});
+
+    EXPECT_FALSE(parser.Parse(segment.data(), static_cast<int>(segment.size())));
+    EXPECT_EQ(0u, emitted);
+  }
+}
+
+TEST_F(PackedAacParserTest, RejectsTruncatedFramesWhenFlushed) {
+  const auto segment = Segment({Frame(payload_)});
+  const size_t tag_size = segment.size() - 7 - payload_.size();
+  for (const size_t frame_bytes : {1u, 6u, 7u, 8u, 25u, 73u}) {
+    PackedAudioParser parser;
+    size_t emitted = 0;
+    parser.Init(
+        MediaParser::InitCB(),
+        [&emitted](uint32_t, std::shared_ptr<MediaSample>) {
+          ++emitted;
+          return true;
+        },
+        MediaParser::NewTextSampleCB(), &key_source_);
+
+    ASSERT_TRUE(parser.Parse(segment.data(),
+                             static_cast<int>(tag_size + frame_bytes)));
+    EXPECT_FALSE(parser.Flush());
+    EXPECT_EQ(0u, emitted);
+  }
+}
+
+TEST_F(PackedAacParserTest, RejectsClearLeadWithoutLaterSetupWhenDecrypting) {
+  const auto segment = Segment({Frame(payload_)}, 90000, false);
+
+  ASSERT_TRUE(parser_.Parse(segment.data(), static_cast<int>(segment.size())));
+  EXPECT_FALSE(parser_.Flush());
+  EXPECT_TRUE(samples_.empty());
+}
+
+TEST_F(PackedAacParserTest, ReportsARejectedAacSampleCallback) {
+  const auto segment = Segment({Frame(payload_)});
+  PackedAudioParser parser;
+  size_t emitted = 0;
+  parser.Init(
+      MediaParser::InitCB(),
+      [&emitted](uint32_t, std::shared_ptr<MediaSample>) {
+        ++emitted;
+        return false;
+      },
+      MediaParser::NewTextSampleCB(), &key_source_);
 
   EXPECT_FALSE(parser.Parse(segment.data(), static_cast<int>(segment.size())));
+  EXPECT_EQ(1u, emitted);
+}
+
+TEST_F(PackedAacParserTest, DecryptsRepositoryHlsFixturesToOriginalMp4Samples) {
+  std::string packed_audio;
+  for (int segment = 1; segment <= 3; ++segment) {
+    std::string data;
+    ASSERT_TRUE(File::ReadFileToString(
+        GetAppTestDataFilePath("avc-ts-aac-packed-audio-with-encryption/"
+                               "bear-640x360-audio-" +
+                               std::to_string(segment) + ".aac")
+            .string()
+            .c_str(),
+        &data));
+    packed_audio += data;
+  }
+  const auto mp4_path = GetTestDataFilePath("bear-640x360.mp4");
+  std::string mp4_audio;
+  ASSERT_TRUE(File::ReadFileToString(mp4_path.string().c_str(), &mp4_audio));
+
+  key_.key = {0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39,
+              0x30, 0x21, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37};
+  key_.iv = {0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x30,
+             0,    0,    0,    0,    0,    0,    0,    0};
+  mp4::MP4MediaParser mp4_parser;
+  uint32_t audio_track_id = 0;
+  std::vector<std::vector<uint8_t>> expected;
+  mp4_parser.Init(
+      [&audio_track_id](
+          const std::vector<std::shared_ptr<StreamInfo>>& streams) {
+        for (const auto& stream : streams) {
+          if (stream->codec() == kCodecAAC)
+            audio_track_id = stream->track_id();
+        }
+      },
+      [&expected, &audio_track_id](uint32_t track_id,
+                                  std::shared_ptr<MediaSample> sample) {
+        if (track_id == audio_track_id)
+          expected.emplace_back(sample->data(),
+                                sample->data() + sample->data_size());
+        return true;
+      },
+      MediaParser::NewTextSampleCB(), nullptr);
+  ASSERT_TRUE(mp4_parser.LoadMoov(mp4_path.string()));
+  ASSERT_TRUE(mp4_parser.Parse(
+      reinterpret_cast<const uint8_t*>(mp4_audio.data()),
+      static_cast<int>(mp4_audio.size())));
+  ASSERT_TRUE(mp4_parser.Flush());
+  ASSERT_EQ(119u, expected.size());
+
+  for (size_t i = 0; i < packed_audio.size(); i += 17)
+    ASSERT_TRUE(parser_.Parse(
+        reinterpret_cast<const uint8_t*>(packed_audio.data()) + i,
+        static_cast<int>(std::min<size_t>(17, packed_audio.size() - i))));
+  ASSERT_TRUE(parser_.Flush());
+  std::vector<std::vector<uint8_t>> decrypted;
+  for (const auto& sample : samples_)
+    decrypted.emplace_back(sample->data(),
+                           sample->data() + sample->data_size());
+  EXPECT_EQ(expected, decrypted);
+}
+
+TEST_F(PackedEc3ParserTest, DecryptsEc3AcrossOneByteChunks) {
+  const auto frame = MakeEc3Frame();
+  auto segment = Segment({frame});
+  AppendId3Padding(&segment, 3);
+  for (size_t i = 0; i < segment.size(); ++i)
+    ASSERT_TRUE(parser_.Parse(segment.data() + i, 1));
+  ASSERT_TRUE(parser_.Flush());
+  EXPECT_TRUE(parser_.Flush());
+
+  ASSERT_EQ(1u, streams_.size());
+  EXPECT_EQ(kCodecEAC3, streams_[0]->codec());
+  const auto* audio = static_cast<const AudioStreamInfo*>(streams_[0].get());
+  EXPECT_EQ(48000u, audio->sampling_frequency());
+  EXPECT_EQ(6u, audio->num_channels());
+  ASSERT_EQ(1u, samples_.size());
+  EXPECT_EQ(90000, samples_[0]->pts());
+  EXPECT_EQ(2880, samples_[0]->duration());
+  EXPECT_EQ(frame, std::vector<uint8_t>(
+                       samples_[0]->data(),
+                       samples_[0]->data() + samples_[0]->data_size()));
+}
+
+TEST_F(PackedEc3ParserTest, GroupsOneTwoAndThreeBlockFrames) {
+  const size_t block_counts[] = {1, 2, 3};
+  for (uint8_t blocks_code = 0; blocks_code < 3; ++blocks_code) {
+    SCOPED_TRACE(blocks_code);
+    samples_.clear();
+    const auto frame = MakeEc3Frame(blocks_code);
+    std::vector<std::vector<uint8_t>> frames;
+    std::vector<uint8_t> expected_sample;
+    for (size_t i = 0; i < 6 / block_counts[blocks_code]; ++i) {
+      frames.push_back(frame);
+      expected_sample.insert(expected_sample.end(), frame.begin(), frame.end());
+    }
+    auto segment = Segment(frames);
+    const auto next = Segment(frames);
+    segment.insert(segment.end(), next.end() - expected_sample.size(),
+                   next.end());
+    for (size_t i = 0; i < segment.size(); ++i)
+      ASSERT_TRUE(parser_.Parse(segment.data() + i, 1));
+    ASSERT_TRUE(parser_.Flush());
+    ASSERT_EQ(2u, samples_.size());
+    for (size_t i = 0; i < samples_.size(); ++i) {
+      EXPECT_EQ(90000 + 2880 * i, samples_[i]->pts());
+      EXPECT_EQ(2880, samples_[i]->duration());
+      EXPECT_EQ(
+          expected_sample,
+          std::vector<uint8_t>(samples_[i]->data(),
+                               samples_[i]->data() + samples_[i]->data_size()));
+    }
+  }
+}
+
+TEST_F(PackedEc3ParserTest, KeepsRounded44100HzDurationsCumulative) {
+  config_[2] = 0x60;
+  const auto frame = MakeEc3Frame(3, 0, 1);
+  auto segment = Segment({frame});
+  const auto second = Segment({frame});
+  segment.insert(segment.end(), second.end() - frame.size(), second.end());
+  ASSERT_TRUE(parser_.Parse(segment.data(), static_cast<int>(segment.size())));
+  ASSERT_TRUE(parser_.Flush());
+  ASSERT_EQ(2u, samples_.size());
+  EXPECT_EQ(90000, samples_[0]->pts());
+  EXPECT_EQ(3134, samples_[0]->duration());
+  EXPECT_EQ(93134, samples_[1]->pts());
+  EXPECT_EQ(3135, samples_[1]->duration());
+}
+
+TEST_F(PackedEc3ParserTest, DecryptsDependentFramesWithChainedCbc) {
+  config_ = {0, 0, 0x20, 0x0f, 0x02, 0x02};
+  const auto independent = MakeEc3Frame(0);
+  const auto dependent = MakeEc3Frame(0, 1, 0, 82);
+  std::vector<std::vector<uint8_t>> frames;
+  std::vector<uint8_t> expected_sample;
+  for (size_t i = 0; i < 6; ++i) {
+    frames.push_back(independent);
+    frames.push_back(dependent);
+    expected_sample.insert(expected_sample.end(), independent.begin(),
+                           independent.end());
+    expected_sample.insert(expected_sample.end(), dependent.begin(),
+                           dependent.end());
+  }
+  auto segment = Segment(frames);
+  const auto second = Segment(frames);
+  segment.insert(segment.end(), second.end() - expected_sample.size(),
+                 second.end());
+  const auto third = Segment(frames, 95760);
+  segment.insert(segment.end(), third.begin(), third.end());
+  for (size_t i = 0; i < segment.size(); ++i)
+    ASSERT_TRUE(parser_.Parse(segment.data() + i, 1));
+  ASSERT_TRUE(parser_.Flush());
+  ASSERT_EQ(1u, streams_.size());
+  EXPECT_EQ(config_, streams_[0]->codec_config());
+  const auto* audio = static_cast<const AudioStreamInfo*>(streams_[0].get());
+  EXPECT_EQ(8u, audio->num_channels());
+  ASSERT_EQ(3u, samples_.size());
+  for (size_t i = 0; i < samples_.size(); ++i) {
+    EXPECT_EQ(90000 + 2880 * i, samples_[i]->pts());
+    EXPECT_EQ(2880, samples_[i]->duration());
+    EXPECT_EQ(
+        expected_sample,
+        std::vector<uint8_t>(samples_[i]->data(),
+                             samples_[i]->data() + samples_[i]->data_size()));
+  }
+}
+
+TEST_F(PackedEc3ParserTest, RejectsIncompleteAccessUnitsAndTruncatedFrames) {
+  for (bool truncated_frame : {false, true}) {
+    SCOPED_TRACE(truncated_frame);
+    PackedAudioParser parser;
+    size_t emitted = 0;
+    parser.Init(
+        MediaParser::InitCB(),
+        [&emitted](uint32_t, std::shared_ptr<MediaSample>) {
+          ++emitted;
+          return true;
+        },
+        MediaParser::NewTextSampleCB(), &key_source_);
+    auto segment =
+        Segment({MakeEc3Frame(static_cast<uint8_t>(truncated_frame ? 3 : 0))});
+    if (truncated_frame)
+      segment.pop_back();
+    ASSERT_TRUE(parser.Parse(segment.data(), static_cast<int>(segment.size())));
+    EXPECT_FALSE(parser.Flush());
+    EXPECT_EQ(0u, emitted);
+  }
+}
+
+TEST_F(PackedEc3ParserTest, RejectsIncompleteAccessUnitBeforeNextId3) {
+  auto segment = Segment({MakeEc3Frame(0)});
+  const auto next = Segment({MakeEc3Frame()}, 92880);
+  segment.insert(segment.end(), next.begin(), next.end());
+  EXPECT_FALSE(parser_.Parse(segment.data(), static_cast<int>(segment.size())));
+  EXPECT_TRUE(samples_.empty());
+}
+
+TEST_F(PackedEc3ParserTest, RejectsOrphanedDependentFrame) {
+  config_ = {0, 0, 0x20, 0x0f, 0x02, 0x02};
+  const auto segment = Segment({MakeEc3Frame(3, 1)});
+  EXPECT_FALSE(parser_.Parse(segment.data(), static_cast<int>(segment.size())));
+  EXPECT_TRUE(samples_.empty());
+}
+
+TEST_F(PackedEc3ParserTest, RejectsDependentBlockCountMismatch) {
+  config_ = {0, 0, 0x20, 0x0f, 0x02, 0x02};
+  const auto segment = Segment({MakeEc3Frame(2), MakeEc3Frame(1, 1)});
+  EXPECT_FALSE(parser_.Parse(segment.data(), static_cast<int>(segment.size())));
+  EXPECT_TRUE(samples_.empty());
+}
+
+TEST_F(PackedEc3ParserTest, RejectsMissingConfiguredDependentAtEndOfInput) {
+  config_ = {0, 0, 0x20, 0x0f, 0x02, 0x02};
+  const auto segment = Segment({MakeEc3Frame()});
+  ASSERT_TRUE(parser_.Parse(segment.data(), static_cast<int>(segment.size())));
+  EXPECT_FALSE(parser_.Flush());
+  EXPECT_TRUE(samples_.empty());
+}
+
+TEST_F(PackedEc3ParserTest, RejectsMoreThanSixBlocksInAnAccessUnit) {
+  const auto segment =
+      Segment({MakeEc3Frame(2), MakeEc3Frame(1), MakeEc3Frame(1)});
+  EXPECT_FALSE(parser_.Parse(segment.data(), static_cast<int>(segment.size())));
+  EXPECT_TRUE(samples_.empty());
+}
+
+TEST_F(PackedEc3ParserTest, DecryptsTwoDependentSubstreamsInOrder) {
+  config_ = {0, 0, 0x20, 0x0f, 0x04, 0x06};
+  const auto independent = MakeEc3Frame();
+  const auto first_dependent = MakeEc3Frame(3, 1);
+  auto second_dependent = first_dependent;
+  second_dependent[2] |= 8;
+  second_dependent[7] = 0x10;
+  const uint16_t crc =
+      Ac3Crc(second_dependent.data() + 2, second_dependent.size() - 4);
+  second_dependent[second_dependent.size() - 2] =
+      static_cast<uint8_t>(crc >> 8);
+  second_dependent.back() = static_cast<uint8_t>(crc);
+  const auto segment =
+      Segment({independent, first_dependent, second_dependent});
+  ASSERT_TRUE(parser_.Parse(segment.data(), static_cast<int>(segment.size())));
+  ASSERT_TRUE(parser_.Flush());
+  ASSERT_EQ(1u, samples_.size());
+  std::vector<uint8_t> expected = independent;
+  expected.insert(expected.end(), first_dependent.begin(),
+                  first_dependent.end());
+  expected.insert(expected.end(), second_dependent.begin(),
+                  second_dependent.end());
+  EXPECT_EQ(expected, std::vector<uint8_t>(
+                          samples_[0]->data(),
+                          samples_[0]->data() + samples_[0]->data_size()));
+  ASSERT_EQ(1u, streams_.size());
+  const auto* audio = static_cast<const AudioStreamInfo*>(streams_[0].get());
+  EXPECT_EQ(9u, audio->num_channels());
+}
+
+TEST_F(PackedEc3ParserTest, PreservesClearLeadBeforeEncryptedSetup) {
+  const auto frame = MakeEc3Frame();
+  auto segment = MakeClearPackedAc3SegmentWithFrames(90000, {frame});
+  const auto encrypted = Segment({frame}, 92880);
+  segment.insert(segment.end(), encrypted.begin(), encrypted.end());
+  ASSERT_TRUE(parser_.Parse(segment.data(), static_cast<int>(segment.size())));
+  ASSERT_TRUE(parser_.Flush());
+  ASSERT_EQ(2u, samples_.size());
+  for (size_t i = 0; i < samples_.size(); ++i) {
+    EXPECT_EQ(frame, std::vector<uint8_t>(
+                         samples_[i]->data(),
+                         samples_[i]->data() + samples_[i]->data_size()));
+    EXPECT_EQ(90000 + 2880 * i, samples_[i]->pts());
+    EXPECT_EQ(2880, samples_[i]->duration());
+  }
+}
+
+TEST_F(PackedEc3ParserTest,
+       FindsSetupAfterMultipleClearTagsAcrossOneByteChunks) {
+  const auto first_frame = MakeEc3Frame();
+  const auto second_frame = MakeEc3Frame(3, 0, 0, 82);
+  const auto first = MakeClearPackedAc3SegmentWithFrames(90000, {first_frame});
+  auto second = MakeClearPackedAc3SegmentWithFrames(92880, {second_frame});
+  AppendId3Padding(&second, 3);
+  const auto encrypted = Segment({first_frame}, 95760);
+  const std::vector<uint8_t>* clear_segments[] = {&first, &second};
+  for (const auto* segment : clear_segments) {
+    for (size_t i = 0; i < segment->size(); ++i)
+      ASSERT_TRUE(parser_.Parse(segment->data() + i, 1));
+    EXPECT_TRUE(samples_.empty());
+  }
+  for (size_t i = 0; i < encrypted.size(); ++i)
+    ASSERT_TRUE(parser_.Parse(encrypted.data() + i, 1));
+  ASSERT_TRUE(parser_.Flush());
+  ASSERT_EQ(1u, streams_.size());
+  EXPECT_EQ(config_, streams_[0]->codec_config());
+  ASSERT_EQ(3u, samples_.size());
+  const std::vector<std::vector<uint8_t>> expected = {first_frame, second_frame,
+                                                      first_frame};
+  for (size_t i = 0; i < samples_.size(); ++i) {
+    EXPECT_EQ(expected[i], std::vector<uint8_t>(
+                               samples_[i]->data(),
+                               samples_[i]->data() + samples_[i]->data_size()));
+    EXPECT_EQ(90000 + 2880 * i, samples_[i]->pts());
+    EXPECT_EQ(2880, samples_[i]->duration());
+  }
+}
+
+TEST_F(PackedEc3ParserTest, RejectsClearLeadWithoutLaterSetupWhenFlushed) {
+  const auto segment =
+      MakeClearPackedAc3SegmentWithFrames(90000, {MakeEc3Frame()});
+  ASSERT_TRUE(parser_.Parse(segment.data(), static_cast<int>(segment.size())));
+  EXPECT_TRUE(samples_.empty());
+  EXPECT_FALSE(parser_.Flush());
+}
+
+TEST_F(PackedEc3ParserTest, RejectsAdditionalIndependentProgram) {
+  auto frame = MakeEc3Frame();
+  frame[2] |= 8;
+  const uint16_t crc = Ac3Crc(frame.data() + 2, frame.size() - 4);
+  frame[frame.size() - 2] = static_cast<uint8_t>(crc >> 8);
+  frame.back() = static_cast<uint8_t>(crc);
+  const auto segment = Segment({frame});
+  EXPECT_FALSE(parser_.Parse(segment.data(), static_cast<int>(segment.size())));
+  EXPECT_TRUE(samples_.empty());
+}
+
+TEST_F(PackedEc3ParserTest, RejectsEncryptedEc3WithoutExplicitIv) {
+  const auto segment = Segment({MakeEc3Frame()});
+  key_.iv.clear();
+  EXPECT_FALSE(parser_.Parse(segment.data(), static_cast<int>(segment.size())));
+  EXPECT_TRUE(samples_.empty());
+}
+
+TEST_F(PackedEc3ParserTest, RejectsAnEightByteIv) {
+  const auto segment = Segment({MakeEc3Frame()});
+  key_.iv.resize(8);
+  EXPECT_FALSE(parser_.Parse(segment.data(), static_cast<int>(segment.size())));
+  EXPECT_TRUE(samples_.empty());
+}
+
+TEST_F(PackedEc3ParserTest, RejectsWrongExplicitIvBeforeEmittingAudio) {
+  const auto segment = Segment({MakeEc3Frame()});
+  key_.iv[0] ^= 1;
+  EXPECT_FALSE(parser_.Parse(segment.data(), static_cast<int>(segment.size())));
+  EXPECT_TRUE(samples_.empty());
+}
+
+TEST_F(PackedEc3ParserTest, RejectsSetupThatDisagreesWithFrameHeader) {
+  config_[3] = 0x04;
+  const auto segment = Segment({MakeEc3Frame()});
+  EXPECT_FALSE(parser_.Parse(segment.data(), static_cast<int>(segment.size())));
+  EXPECT_TRUE(samples_.empty());
+}
+
+TEST_F(PackedEc3ParserTest, RejectsCiphertextCorruptionBeforeEmittingAudio) {
+  auto segment = Segment({MakeEc3Frame()});
+  segment[segment.size() - 20] ^= 1;
+  EXPECT_FALSE(parser_.Parse(segment.data(), static_cast<int>(segment.size())));
+  EXPECT_TRUE(samples_.empty());
+}
+
+TEST_F(PackedEc3ParserTest, KeepsSetupAcrossEncryptedToClearTransition) {
+  const auto frame = MakeEc3Frame();
+  auto segment = Segment({frame});
+  const auto clear = MakeClearPackedAc3SegmentWithFrames(92880, {frame});
+  segment.insert(segment.end(), clear.begin(), clear.end());
+  ASSERT_TRUE(parser_.Parse(segment.data(), static_cast<int>(segment.size())));
+  ASSERT_TRUE(parser_.Flush());
+  ASSERT_EQ(2u, samples_.size());
+  EXPECT_EQ(frame, std::vector<uint8_t>(
+                       samples_[1]->data(),
+                       samples_[1]->data() + samples_[1]->data_size()));
+  EXPECT_EQ(92880, samples_[1]->pts());
+}
+
+TEST_F(PackedEc3ParserTest, DecryptsCompleteEc3ElementaryStreamFixture) {
+  const auto audio = ReadTestDataFile("bear.eac3");
+  ASSERT_FALSE(audio.empty());
+  config_ = {0x06, 0x40, 0x60, 0x04, 0};
+  size_t frame_count = 0;
+  for (size_t offset = 0; offset < audio.size(); ++frame_count) {
+    ASSERT_GE(audio.size() - offset, 6u);
+    ASSERT_EQ(0x0b, audio[offset]);
+    ASSERT_EQ(0x77, audio[offset + 1]);
+    const size_t frame_size =
+        (((audio[offset + 2] & 7) << 8) + audio[offset + 3] + 1) * 2;
+    ASSERT_LE(frame_size, audio.size() - offset);
+    ASSERT_EQ(3u, (audio[offset + 4] >> 4) & 3);
+    const std::vector<uint8_t> frame(audio.begin() + offset,
+                                     audio.begin() + offset + frame_size);
+    const int64_t timestamp =
+        90000 + static_cast<int64_t>(frame_count) * 1536 * 90000 / 44100;
+    const auto segment = Segment({frame}, timestamp);
+    for (size_t i = 0; i < segment.size(); i += 17)
+      ASSERT_TRUE(parser_.Parse(
+          segment.data() + i,
+          static_cast<int>(std::min<size_t>(17, segment.size() - i))));
+    offset += frame_size;
+  }
+  ASSERT_TRUE(parser_.Flush());
+  ASSERT_EQ(frame_count, samples_.size());
+  std::vector<uint8_t> decrypted;
+  for (const auto& sample : samples_)
+    decrypted.insert(decrypted.end(), sample->data(),
+                     sample->data() + sample->data_size());
+  EXPECT_EQ(audio, decrypted);
+}
+
+TEST_F(PackedEc3ParserTest, DecryptsRepositoryHlsFixturesToOriginalMp4Samples) {
+  std::string packed_audio;
+  for (int segment = 1; segment <= 3; ++segment) {
+    std::string data;
+    ASSERT_TRUE(File::ReadFileToString(
+        GetAppTestDataFilePath("ec3-packed-audio-encrypted/"
+                               "bear-640x360-ec3-audio-" +
+                               std::to_string(segment) + ".ec3")
+            .string()
+            .c_str(),
+        &data));
+    packed_audio += data;
+  }
+  std::string mp4_audio;
+  ASSERT_TRUE(File::ReadFileToString(
+      GetTestDataFilePath("bear-640x360-ec3.mp4").string().c_str(),
+      &mp4_audio));
+
+  key_.key = {0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39,
+              0x30, 0x21, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37};
+  key_.iv = {0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x30,
+             0,    0,    0,    0,    0,    0,    0,    0};
+  mp4::MP4MediaParser mp4_parser;
+  uint32_t audio_track_id = 0;
+  std::vector<std::vector<uint8_t>> expected;
+  mp4_parser.Init(
+      [&audio_track_id](
+          const std::vector<std::shared_ptr<StreamInfo>>& streams) {
+        for (const auto& stream : streams) {
+          if (stream->codec() == kCodecEAC3)
+            audio_track_id = stream->track_id();
+        }
+      },
+      [&expected, &audio_track_id](uint32_t track_id,
+                                   std::shared_ptr<MediaSample> sample) {
+        if (track_id == audio_track_id)
+          expected.emplace_back(sample->data(),
+                                sample->data() + sample->data_size());
+        return true;
+      },
+      MediaParser::NewTextSampleCB(), nullptr);
+  ASSERT_TRUE(mp4_parser.LoadMoov(
+      GetTestDataFilePath("bear-640x360-ec3.mp4").string()));
+  ASSERT_TRUE(
+      mp4_parser.Parse(reinterpret_cast<const uint8_t*>(mp4_audio.data()),
+                       static_cast<int>(mp4_audio.size())));
+  ASSERT_TRUE(mp4_parser.Flush());
+  ASSERT_FALSE(expected.empty());
+  ASSERT_TRUE(
+      parser_.Parse(reinterpret_cast<const uint8_t*>(packed_audio.data()),
+                    static_cast<int>(packed_audio.size())));
+  ASSERT_TRUE(parser_.Flush());
+  std::vector<std::vector<uint8_t>> decrypted;
+  for (const auto& sample : samples_)
+    decrypted.emplace_back(sample->data(),
+                           sample->data() + sample->data_size());
+  EXPECT_EQ(expected, decrypted);
 }
 
 TEST(PackedAudioParserTest, RejectsEncryptedAc3WithAnEightByteIv) {

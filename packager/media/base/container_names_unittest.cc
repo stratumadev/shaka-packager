@@ -34,6 +34,47 @@ TEST(ContainerNamesTest, DetectsPackedAc3WithId3AndSegmentBoundaries) {
                                static_cast<int>(input.size())));
 }
 
+TEST(ContainerNamesTest, DetectsPackedEc3WithId3AndSegmentBoundaries) {
+  std::string input;
+  for (int segment = 1; segment <= 3; ++segment) {
+    std::string part;
+    ASSERT_TRUE(File::ReadFileToString(
+        GetAppTestDataFilePath("ec3-packed-audio-encrypted/"
+                               "bear-640x360-ec3-audio-" +
+                               std::to_string(segment) + ".ec3")
+            .string()
+            .c_str(),
+        &part));
+    EXPECT_EQ(CONTAINER_EAC3,
+              DetermineContainer(reinterpret_cast<const uint8_t*>(part.data()),
+                                 static_cast<int>(part.size())));
+    input += part;
+  }
+  EXPECT_EQ(CONTAINER_EAC3,
+            DetermineContainer(reinterpret_cast<const uint8_t*>(input.data()),
+                               static_cast<int>(input.size())));
+}
+
+TEST(ContainerNamesTest, DetectsPackedAacWithId3AndSegmentBoundaries) {
+  std::string input;
+  for (int segment = 1; segment <= 3; ++segment) {
+    std::string part;
+    ASSERT_TRUE(File::ReadFileToString(
+        GetAppTestDataFilePath("avc-ts-aac-packed-audio-with-encryption/"
+                              "bear-640x360-audio-" +
+                              std::to_string(segment) + ".aac")
+            .string().c_str(),
+        &part));
+    EXPECT_EQ(CONTAINER_AAC,
+              DetermineContainer(reinterpret_cast<const uint8_t*>(part.data()),
+                                 static_cast<int>(part.size())));
+    input += part;
+  }
+  EXPECT_EQ(CONTAINER_AAC,
+            DetermineContainer(reinterpret_cast<const uint8_t*>(input.data()),
+                               static_cast<int>(input.size())));
+}
+
 TEST(ContainerNamesTest, DoesNotIdentifyMalformedId3AsPackedAc3) {
   const uint8_t invalid_size[] = {'I', 'D', '3', 4, 0, 0, 0, 0, 0, 0x80};
   EXPECT_EQ(CONTAINER_UNKNOWN,

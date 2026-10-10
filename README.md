@@ -36,10 +36,10 @@ Shaka Packager supports:
   |       VP8         |    I / O     |    I / O     |       -      |      -      |       -      |
   |       VP9         |    I / O     |    I / O     |       -      |      -      |       -      |
   |       AV1         |    I / O     |    I / O     |       -      |      -      |       -      |
-  |       AAC         |    I / O     |      -       |     I / O    |      I      |       O      |
+  |       AAC         |    I / O     |      -       |     I / O    |      I      |     I / O    |
   |       MP3         |      O       |      -       |     I / O    |      -      |       O      |
   |    Dolby AC3      |    I / O     |      -       |     I / O    |      -      |     I / O    |
-  |    Dolby EAC3     |    I / O     |      -       |       O      |      -      |       O      |
+  |    Dolby EAC3     |    I / O     |      -       |       O      |      -      |     I / O    |
   |   MPEG-H Audio    |    I / O     |      -       |       -      |      -      |       -      |
   |    Dolby AC4      |    I / O     |      -       |       -      |      -      |       -      |
   |       DTS         |    I / O     |      -       |       -      |      -      |       -      |

@@ -1626,6 +1626,14 @@ static MediaContainerName LookupContainerByFirst4(const uint8_t* buffer,
           CheckAc3(buffer + offset, 7)) {
         return CONTAINER_AC3;
       }
+      if (offset > 0 && buffer_size - offset >= 7 &&
+          CheckEac3(buffer + offset, 7)) {
+        return CONTAINER_EAC3;
+      }
+      if (offset > 0 && buffer_size - offset >= 7 &&
+          CheckAac(buffer + offset, 7)) {
+        return CONTAINER_AAC;
+      }
       if (CheckMp3(buffer, buffer_size, true))
         return CONTAINER_MP3;
       break;

@@ -194,6 +194,8 @@ Status Demuxer::InitializeParser() {
       parser_.reset(new mp4::MP4MediaParser());
       break;
     case CONTAINER_AC3:
+    case CONTAINER_EAC3:
+    case CONTAINER_AAC:
       parser_.reset(new PackedAudioParser());
       break;
     case CONTAINER_MPEG2TS:

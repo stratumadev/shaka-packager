@@ -7,6 +7,8 @@
 add_library(ac3_header STATIC
   ac3_header.cc
   ac3_header.h
+  adts_header.cc
+  adts_header.h
   audio_header.h
   )
 target_link_libraries(ac3_header
@@ -14,8 +16,6 @@ target_link_libraries(ac3_header
   )
 
 add_library(mp2t STATIC
-  adts_header.cc
-  adts_header.h
   audio_header.h
   continuity_counter.cc
   continuity_counter.h

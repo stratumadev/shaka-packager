@@ -37,7 +37,7 @@ if __name__ == '__main__':
   # else:
   #   output = '{0}-ZLO7'.format(version_hash)
 
-  output = '{0}-ZLO7'.format('v3.9.40')
+  output = '{0}-ZLO7'.format('v3.10.6')
 
   # Final debug message, mirroring what is used to generate the source file:
   print('Final output: {}'.format(output), file=sys.stderr)
