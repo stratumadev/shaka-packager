@@ -23,6 +23,8 @@ struct MuxerOptions {
   /// MP4 (ISO-BMFF) specific parameters.
   Mp4OutputParams mp4_params;
 
+  std::string input_file_name;
+
   // A positive value, in milliseconds, by which output timestamps are offset to
   // compensate for negative timestamps in the input.
   int32_t transport_stream_timestamp_offset_ms = 0;

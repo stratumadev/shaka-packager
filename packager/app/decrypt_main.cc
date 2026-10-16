@@ -4,6 +4,8 @@
 // license that can be found in the LICENSE file or at
 // https://developers.google.com/open-source/licenses/bsd
 
+#include <algorithm>
+#include <chrono>
 #include <iostream>
 #include <clocale>
 #include <cstring>
@@ -68,7 +70,8 @@ void PrintUsage(const char* program) {
       << "Encrypted HLS packed AC-3 requires one key; an explicit IV is preferred.\n"
       << "Without an IV, first-frame coupling-pattern recovery is attempted.\n"
       << "SAMPLE-AES AVC in MPEG-TS requires one key; an explicit IV is preferred.\n"
-      << "Without an IV, bounded CABAC slice recovery is attempted.\n";
+      << "Without an IV, bounded CABAC slice recovery is attempted.\n"
+      << "Progress is written as 'Progress: N%' lines; --quiet suppresses it.\n";
 }
 
 std::optional<DecryptStreamDescriptor> ParseStreamDescriptor(
@@ -200,6 +203,7 @@ media::MediaContainerName GetOutputFormat(const DecryptStreamDescriptor& stream)
 std::shared_ptr<media::Muxer> CreateMuxer(
     const DecryptStreamDescriptor& stream) {
   media::MuxerOptions options;
+  options.input_file_name = stream.input;
   options.output_file_name = stream.output;
 
   switch (GetOutputFormat(stream)) {
@@ -251,6 +255,26 @@ Status Decrypt(const CommandLine& command_line) {
   RETURN_IF_ERROR(media::MediaHandler::Chain({chunker, muxer}));
   RETURN_IF_ERROR(
       demuxer->SetHandler(command_line.stream.stream_selector, chunker));
+
+  int last_percent = 0;
+  auto last_progress = std::chrono::steady_clock::now();
+  if (!command_line.quiet) {
+    std::cout << "Progress: 0%" << std::endl;
+    demuxer->SetProgressCallback(
+        [&]( uint64_t bytes_parsed, int64_t input_size ) {
+          if (input_size <= 0)
+            return;
+          const int percent = static_cast<int>( std::min(
+              99.0, static_cast<double>( bytes_parsed ) / input_size * 100.0 ) );
+          const auto now = std::chrono::steady_clock::now();
+          if (percent > last_percent &&
+              now - last_progress >= std::chrono::milliseconds( 250 )) {
+            std::cout << "Progress: " << percent << '%' << std::endl;
+            last_percent = percent;
+            last_progress = now;
+          }
+        } );
+  }
   RETURN_IF_ERROR(demuxer->Initialize());
   RETURN_IF_ERROR(demuxer->Run());
 
@@ -263,6 +287,8 @@ Status Decrypt(const CommandLine& command_line) {
                       ". The input may not contain a usable stream for the "
                       "selected stream type.");
   }
+  if (!command_line.quiet)
+    std::cout << "Progress: 100%" << std::endl;
   return Status::OK;
 }
 

@@ -9,11 +9,15 @@
 #include <cstdio>
 #include <filesystem>
 #include <locale>
+#include <thread>
 
 #include <absl/flags/declare.h>
+#include <absl/synchronization/notification.h>
 #include <gtest/gtest.h>
 
+#include <packager/file/callback_file.h>
 #include <packager/file/file_test_util.h>
+#include <packager/file/threaded_io_file.h>
 #include <packager/flag_saver.h>
 
 ABSL_DECLARE_FLAG(uint64_t, io_cache_size);
@@ -368,6 +372,52 @@ INSTANTIATE_TEST_SUITE_P(TestSeekWithDifferentCacheSizes,
                          // 0 disables cache, 20 is small, 61 is prime, and 1000
                          // is just under the data size of 1k.
                          ::testing::Values(0u, 20u, 61u, 1000u));
+
+class ThreadedIoFileForTest : public ThreadedIoFile {
+ public:
+  using ThreadedIoFile::ThreadedIoFile;
+  using ThreadedIoFile::Open;
+};
+
+TEST( FileTest, ThreadedWriteErrorDuringFlush ) {
+  for ( const int64_t write_result : { int64_t{ -7 }, int64_t{ 0 } } ) {
+    SCOPED_TRACE( write_result );
+    absl::Notification write_started;
+    absl::Notification allow_error;
+    BufferCallbackParams callback_params;
+    callback_params.write_func =
+        [&]( const std::string&, const void*, uint64_t ) -> int64_t {
+          write_started.Notify();
+          allow_error.WaitForNotification();
+          return write_result;
+        };
+    const std::string file_name =
+        File::MakeCallbackFileName( callback_params, "write-error" )
+            .substr( std::string( kCallbackFilePrefix ).size() );
+    std::unique_ptr<File, FileCloser> internal_file(
+        new CallbackFile( file_name.c_str(), "w" ) );
+    std::unique_ptr<ThreadedIoFileForTest, FileCloser> file(
+        new ThreadedIoFileForTest( std::move( internal_file ),
+                                  ThreadedIoFile::kOutputMode, 1, 1 ) );
+    ASSERT_TRUE( file->Open() );
+    const uint8_t byte = 0;
+    EXPECT_EQ( 1, file->Write( &byte, 1 ) );
+    write_started.WaitForNotification();
+    EXPECT_EQ( 1, file->Write( &byte, 1 ) );
+    bool flush_result = true;
+    std::thread flush_thread( [&] { flush_result = file->Flush(); } );
+    EXPECT_EQ( 0, file->Write( &byte, 1 ) );
+    allow_error.Notify();
+    flush_thread.join();
+
+    EXPECT_FALSE( flush_result );
+    EXPECT_FALSE( file->Flush() );
+    EXPECT_FALSE( file->Seek( 0 ) );
+    EXPECT_EQ( write_result < 0 ? write_result : -1,
+               file->Write( &byte, 1 ) );
+    EXPECT_FALSE( file.release()->Close() );
+  }
+}
 
 TEST(FileTest, MakeCallbackFileName) {
   const BufferCallbackParams* params =

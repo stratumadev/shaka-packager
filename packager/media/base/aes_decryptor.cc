@@ -171,7 +171,8 @@ void AesCbcDecryptor::CbcDecryptBlocks(const uint8_t* ciphertext,
   // Copy the final block of ciphertext before decryption, since we could be
   // decrypting in-place.
   const uint8_t* last_block = ciphertext + ciphertext_size - AES_BLOCK_SIZE;
-  std::vector<uint8_t> next_iv(last_block, last_block + AES_BLOCK_SIZE);
+  uint8_t next_iv[AES_BLOCK_SIZE];
+  memcpy(next_iv, last_block, sizeof(next_iv));
 
   size_t output_size = 0;
   CHECK_EQ(mbedtls_cipher_crypt(&cipher_ctx_, iv, AES_BLOCK_SIZE, ciphertext,
@@ -179,7 +180,7 @@ void AesCbcDecryptor::CbcDecryptBlocks(const uint8_t* ciphertext,
            0);
   DCHECK_EQ(output_size % AES_BLOCK_SIZE, 0u);
 
-  memcpy(iv, next_iv.data(), next_iv.size());
+  memcpy(iv, next_iv, sizeof(next_iv));
 }
 
 }  // namespace media

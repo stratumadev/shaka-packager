@@ -34,7 +34,7 @@ ABSL_FLAG(uint64_t,
           "threaded I/O.");
 ABSL_FLAG(uint64_t,
           io_block_size,
-          1ULL << 16,
+          1ULL << 20,
           "Size of the block size used for threaded I/O, in bytes.");
 
 namespace shaka {

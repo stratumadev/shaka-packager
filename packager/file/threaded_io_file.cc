@@ -104,11 +104,10 @@ bool ThreadedIoFile::Flush() {
   DCHECK(internal_file_);
   DCHECK_EQ(kOutputMode, mode_);
 
-  if (internal_file_error_.load(std::memory_order_relaxed))
-    return false;
-
   {
     absl::MutexLock lock(&flush_mutex_);
+    if (internal_file_error_.load(std::memory_order_relaxed))
+      return false;
     flushing_ = true;
     flush_complete_ = false;
   }
@@ -116,7 +115,8 @@ bool ThreadedIoFile::Flush() {
 
   WaitForSignal(&flush_mutex_, &flush_complete_);
 
-  return internal_file_->Flush();
+  return !internal_file_error_.load(std::memory_order_relaxed) &&
+         internal_file_->Flush();
 }
 
 bool ThreadedIoFile::Seek(uint64_t position) {
@@ -214,8 +214,9 @@ void ThreadedIoFile::RunInOutputMode() {
       while (bytes_written < write_bytes) {
         int64_t write_result = internal_file_->Write(
             &io_buffer_[bytes_written], write_bytes - bytes_written);
-        if (write_result < 0) {
-          internal_file_error_.store(write_result, std::memory_order_relaxed);
+        if (write_result <= 0) {
+          internal_file_error_.store(write_result < 0 ? write_result : -1,
+                                     std::memory_order_relaxed);
           cache_.Close();
 
           absl::MutexLock lock(&flush_mutex_);

@@ -9,6 +9,7 @@
 
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -78,6 +79,11 @@ class Demuxer : public OriginHandler {
 
   void set_input_format(std::string input_format) {
     input_format_ = input_format;
+  }
+
+  void SetProgressCallback(
+      std::function<void( uint64_t, int64_t )> callback ) {
+    progress_callback_ = std::move( callback );
   }
 
  protected:
@@ -155,6 +161,9 @@ class Demuxer : public OriginHandler {
   Status init_event_status_;
   // Explicitly defined input format, for avoiding autodetection.
   std::string input_format_;
+  std::function<void( uint64_t, int64_t )> progress_callback_;
+  uint64_t bytes_parsed_ = 0;
+  int64_t input_size_ = -1;
 };
 
 }  // namespace media

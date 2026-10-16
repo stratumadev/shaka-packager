@@ -1011,11 +1011,9 @@ bool MP4MediaParser::EnqueueSample(bool* err) {
 
   const uint8_t* media_data = buf;
   const size_t media_data_size = runs_->sample_size();
-  // Use a dummy data size of 0 to avoid copying overhead.
-  // Actual media data is set later.
-  const size_t kDummyDataSize = 0;
-  std::shared_ptr<MediaSample> stream_sample(
-      MediaSample::CopyFrom(media_data, kDummyDataSize, runs_->is_keyframe()));
+  std::shared_ptr<MediaSample> stream_sample =
+      MediaSample::CreateEmptyMediaSample();
+  stream_sample->set_is_key_frame(runs_->is_keyframe());
 
   if (runs_->is_encrypted()) {
     std::shared_ptr<uint8_t> decrypted_media_data(

@@ -167,6 +167,8 @@ Status Demuxer::InitializeParser() {
     return Status(error::FILE_FAILURE,
                   "Cannot open file for reading " + file_name_);
   }
+  if (progress_callback_)
+    input_size_ = media_file_->Size();
 
   int64_t bytes_read = 0;
   bool eof = false;
@@ -253,6 +255,9 @@ Status Demuxer::InitializeParser() {
     return Status(error::PARSER_FAILURE,
                   "Cannot parse media file " + file_name_);
   }
+  bytes_parsed_ += bytes_read;
+  if (progress_callback_)
+    progress_callback_(bytes_parsed_, input_size_);
   return Status::OK;
 }
 
@@ -417,10 +422,14 @@ Status Demuxer::Parse() {
     return Status(error::FILE_FAILURE, "Cannot read file " + file_name_);
   }
 
-  return parser_->Parse(buffer_.get(), bytes_read)
-             ? Status::OK
-             : Status(error::PARSER_FAILURE,
-                      "Cannot parse media file " + file_name_);
+  if (!parser_->Parse(buffer_.get(), bytes_read)) {
+    return Status(error::PARSER_FAILURE,
+                  "Cannot parse media file " + file_name_);
+  }
+  bytes_parsed_ += bytes_read;
+  if (progress_callback_)
+    progress_callback_(bytes_parsed_, input_size_);
+  return Status::OK;
 }
 
 }  // namespace media

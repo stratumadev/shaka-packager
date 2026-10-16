@@ -7,6 +7,8 @@
 #include <packager/media/formats/mp4/single_segment_segmenter.h>
 
 #include <algorithm>
+#include <filesystem>
+#include <limits>
 
 #include <absl/log/check.h>
 
@@ -37,14 +39,17 @@ SingleSegmentSegmenter::~SingleSegmentSegmenter() {
 bool SingleSegmentSegmenter::GetInitRange(size_t* offset, size_t* size) {
   // In Finalize, ftyp and moov gets written first so offset must be 0.
   *offset = 0;
-  *size = ftyp()->ComputeSize() + moov()->ComputeSize();
+  *size = static_cast<size_t>(ftyp()->ComputeSize()) + moov()->ComputeSize();
   return true;
 }
 
 bool SingleSegmentSegmenter::GetIndexRange(size_t* offset, size_t* size) {
+  if (output_header_size_ != 0)
+    return false;
+
   // Index range is right after init range so the offset must be the size of
   // ftyp and moov.
-  *offset = ftyp()->ComputeSize() + moov()->ComputeSize();
+  *offset = static_cast<size_t>(ftyp()->ComputeSize()) + moov()->ComputeSize();
   *size = options().mp4_params.generate_sidx_in_media_segments
               ? vod_sidx_->ComputeSize()
               : 0;
@@ -53,11 +58,15 @@ bool SingleSegmentSegmenter::GetIndexRange(size_t* offset, size_t* size) {
 
 std::vector<Range> SingleSegmentSegmenter::GetSegmentRanges() {
   std::vector<Range> ranges;
-  uint64_t next_offset = ftyp()->ComputeSize() + moov()->ComputeSize() +
+  uint64_t next_offset = static_cast<uint64_t>(ftyp()->ComputeSize()) +
+                         moov()->ComputeSize() +
                          (options().mp4_params.generate_sidx_in_media_segments
                               ? vod_sidx_->ComputeSize()
                               : 0) +
                          vod_sidx_->first_offset;
+  if (output_header_size_ != 0)
+    next_offset = output_header_size_;
+
   for (const SegmentReference& segment_reference : vod_sidx_->references) {
     Range r;
     r.start = next_offset;
@@ -70,6 +79,53 @@ std::vector<Range> SingleSegmentSegmenter::GetSegmentRanges() {
 }
 
 Status SingleSegmentSegmenter::DoInitialize() {
+#if defined(SHAKA_DECRYPT)
+  bool direct_output = false;
+  if (!options().input_file_name.empty() &&
+      options().input_file_name.find("://") == std::string::npos &&
+      options().output_file_name.find("://") == std::string::npos &&
+      File::IsLocalRegularFile(options().input_file_name.c_str())) {
+    std::error_code ec;
+    const auto input = std::filesystem::u8path(options().input_file_name);
+    const auto output = std::filesystem::u8path(options().output_file_name);
+    const bool output_exists = std::filesystem::exists(output, ec);
+    const bool regular_output =
+        !output_exists || std::filesystem::is_regular_file(output, ec);
+    if (!ec && regular_output &&
+        (!output_exists || !std::filesystem::equivalent(input, output, ec)) &&
+        !ec) {
+      direct_output = true;
+    }
+  }
+  if (direct_output) {
+    output_file_.reset(File::Open(options().output_file_name.c_str(), "w"));
+    if (!output_file_) {
+      return Status(error::FILE_FAILURE,
+                    "Cannot open file to write " + options().output_file_name);
+    }
+
+    BufferWriter buffer;
+    ftyp()->Write(&buffer);
+    moov()->Write(&buffer);
+    const uint32_t padding_size = 64;
+    if (buffer.Size() > std::numeric_limits<size_t>::max() - padding_size) {
+      return Status(error::MUXER_FAILURE, "MP4 header size overflow.");
+    }
+    output_header_size_ = buffer.Size() + padding_size;
+    buffer.AppendInt(padding_size);
+    buffer.AppendInt(static_cast<uint32_t>(FOURCC_free));
+    buffer.AppendVector(std::vector<uint8_t>(padding_size - 8, 0));
+    Status status = buffer.WriteToFile(output_file_.get());
+    if (!status.ok())
+      return status;
+    if (!output_file_->Flush()) {
+      return Status(error::FILE_FAILURE,
+                    "Cannot flush file " + options().output_file_name);
+    }
+    return Status::OK;
+  }
+#endif
+
   // Single segment segmentation involves two stages:
   //   Stage 1: Create media subsegments from media samples
   //   Stage 2: Update media header (moov) which involves copying of media
@@ -88,10 +144,45 @@ Status SingleSegmentSegmenter::DoInitialize() {
 }
 
 Status SingleSegmentSegmenter::DoFinalize() {
-  DCHECK(temp_file_);
   DCHECK(ftyp());
   DCHECK(moov());
   DCHECK(vod_sidx_);
+
+  if (output_file_) {
+    BufferWriter buffer;
+    ftyp()->Write(&buffer);
+    moov()->Write(&buffer);
+    if (buffer.Size() > output_header_size_ ||
+        output_header_size_ - buffer.Size() < 8 ||
+        output_header_size_ - buffer.Size() >
+            std::numeric_limits<uint32_t>::max()) {
+      return Status(error::MUXER_FAILURE,
+                    "Updated MP4 header exceeds reserved space.");
+    }
+    const uint32_t padding_size =
+        static_cast<uint32_t>(output_header_size_ - buffer.Size());
+    buffer.AppendInt(padding_size);
+    buffer.AppendInt(static_cast<uint32_t>(FOURCC_free));
+    buffer.AppendVector(std::vector<uint8_t>(padding_size - 8, 0));
+    if (!output_file_->Seek(0)) {
+      return Status(error::FILE_FAILURE,
+                    "Cannot seek to update MP4 header in " +
+                        options().output_file_name);
+    }
+    Status status = buffer.WriteToFile(output_file_.get());
+    if (!status.ok())
+      return status;
+    if (!output_file_.release()->Close()) {
+      return Status(error::FILE_FAILURE,
+                    "Cannot close file " + options().output_file_name +
+                        ", possibly file permission issue or running out of "
+                        "disk space.");
+    }
+    SetComplete();
+    return Status::OK;
+  }
+
+  DCHECK(temp_file_);
 
   // Close the temp file to prepare for reading later.
   if (!temp_file_.release()->Close()) {
@@ -216,9 +307,9 @@ Status SingleSegmentSegmenter::DoFinalizeSegment(int64_t segment_number) {
                                    key_frame_info.size);
     }
   }
-  // Append fragment buffer to temp file.
   size_t segment_size = fragment_buffer()->Size();
-  Status status = fragment_buffer()->WriteToFile(temp_file_.get());
+  Status status = fragment_buffer()->WriteToFile(
+      output_file_ ? output_file_.get() : temp_file_.get());
   if (!status.ok()) return status;
 
   UpdateProgress(vod_ref.subsegment_duration);
